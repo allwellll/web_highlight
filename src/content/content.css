@@ -19,9 +19,15 @@
 }
 
 .whl-highlight.whl-visual-anchor {
-  background: linear-gradient(to bottom, transparent 42%, var(--whl-bg, rgba(255, 230, 0, 0.32)) 42%);
-  mix-blend-mode: multiply;
-  opacity: 0.72;
+  background: linear-gradient(
+    to bottom,
+    transparent 58%,
+    var(--whl-visual-bg, rgba(255, 230, 0, 0.22)) 58%,
+    var(--whl-visual-bg, rgba(255, 230, 0, 0.22)) 88%,
+    transparent 88%
+  );
+  mix-blend-mode: normal;
+  opacity: 1;
 }
 
 .whl-underline {

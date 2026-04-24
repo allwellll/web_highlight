@@ -691,6 +691,7 @@ function renderTextAnnotations() {
       node.title = "点击打开操作菜单";
       node.style.setProperty("--whl-color", highlight.color || DEFAULT_STATE.highlightColor);
       node.style.setProperty("--whl-bg", hexToRgba(highlight.color || DEFAULT_STATE.highlightColor, 0.45));
+      node.style.setProperty("--whl-visual-bg", hexToRgba(highlight.color || DEFAULT_STATE.highlightColor, 0.22));
       node.style.left = `${rect.left + window.scrollX}px`;
       node.style.top = `${rect.top + window.scrollY}px`;
       node.style.width = `${rect.width}px`;
