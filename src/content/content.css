@@ -1,0 +1,124 @@
+.whl-layer {
+  inset: 0;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  z-index: 2147483646;
+}
+
+.whl-text-mark {
+  border-radius: 3px;
+  box-sizing: border-box;
+  position: absolute;
+}
+
+.whl-highlight {
+  background: var(--whl-bg, rgba(255, 230, 0, 0.45));
+}
+
+.whl-underline {
+  border-bottom: 3px solid var(--whl-color, #e53935);
+  border-radius: 0;
+}
+
+.whl-native-hitbox {
+  background: transparent;
+  border-bottom-color: transparent;
+}
+
+.whl-text-mark.whl-eraser-target,
+.whl-pen-path.whl-eraser-target {
+  outline: 2px solid rgba(255, 80, 80, 0.9);
+}
+
+.whl-pen-layer {
+  left: 0;
+  min-height: 100vh;
+  overflow: visible;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  z-index: 2147483647;
+}
+
+.whl-pen-path {
+  fill: none;
+  stroke: #e53935;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.whl-selection-menu {
+  align-items: center;
+  background: rgba(32, 33, 36, 0.96);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  position: absolute;
+  z-index: 2147483647;
+}
+
+.whl-selection-menu[hidden] {
+  display: none;
+}
+
+.whl-selection-menu input[type="color"],
+.whl-color-button {
+  border: 2px solid rgba(255, 255, 255, 0.82);
+  border-radius: 50%;
+  box-sizing: border-box;
+  cursor: pointer;
+  height: 24px;
+  padding: 0;
+  width: 24px;
+}
+
+.whl-selection-menu input[type="color"] {
+  background: transparent;
+  overflow: hidden;
+}
+
+:root.whl-pen-active,
+:root.whl-eraser-active,
+body.whl-pen-active,
+body.whl-eraser-active {
+  cursor: crosshair !important;
+}
+
+:root.whl-eraser-active .whl-layer,
+:root.whl-eraser-active .whl-text-mark,
+body.whl-eraser-active .whl-layer,
+body.whl-eraser-active .whl-text-mark {
+  pointer-events: auto;
+}
+
+:root.whl-pen-active .whl-pen-layer,
+body.whl-pen-active .whl-pen-layer {
+  pointer-events: auto;
+}
+
+.whl-annotation-menu {
+  background: rgba(32, 33, 36, 0.96);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  padding: 6px;
+  position: absolute;
+  z-index: 2147483647;
+}
+
+.whl-annotation-menu[hidden] {
+  display: none;
+}
+
+.whl-annotation-menu button {
+  background: #fff;
+  border: 0;
+  border-radius: 6px;
+  color: #b3261e;
+  cursor: pointer;
+  font: 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 7px 10px;
+}

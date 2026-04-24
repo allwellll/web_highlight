@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Web Highlight Edge Smoke</title>
+  <style>
+    body { font: 18px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 760px; margin: 48px auto; }
+    .math { font-family: "Times New Roman", serif; }
+  </style>
+</head>
+<body>
+  <h1>Web Highlight Edge Smoke</h1>
+  <p id="normal">这是一段普通文字，用于测试圈选文字高亮、刷新恢复和删除。</p>
+  <p id="math" class="math">公式与数学字符：E = mc²，∫₀^∞ e^{-x²} dx = √π / 2，α + β → γ，∀x∈ℝ。</p>
+  <p id="long">跨行文本测试：浏览器扩展应该根据选区矩形绘制高亮层，而不是修改页面原始 DOM。这样可以减少对业务页面的干扰。</p>
+</body>
+</html>

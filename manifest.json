@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Web Highlight Annotator",
+  "version": "0.1.0",
+  "description": "圈选文字高亮、自由笔迹勾画、删除标注，并按网址同步到坚果云 WebDAV。",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://dav.jianguoyun.com/*"],
+  "icons": {
+    "16": "src/icons/icon-16.png",
+    "32": "src/icons/icon-32.png",
+    "48": "src/icons/icon-48.png",
+    "128": "src/icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "src/background/service_worker.js"
+  },
+  "action": {
+    "default_title": "Web Highlight",
+    "default_icon": {
+      "16": "src/icons/icon-16.png",
+      "32": "src/icons/icon-32.png",
+      "48": "src/icons/icon-48.png",
+      "128": "src/icons/icon-128.png"
+    },
+    "default_popup": "src/popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/content.js"],
+      "css": ["src/content/content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

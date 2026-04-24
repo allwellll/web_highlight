@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="popup.css">
+    <title>Web Highlight</title>
+  </head>
+  <body>
+    <main>
+      <h1>Web Highlight</h1>
+
+      <section>
+        <h2>功能菜单</h2>
+        <div class="tool-grid" role="group" aria-label="标注工具">
+          <button data-mode="browse">浏览模式</button>
+          <button data-mode="highlight">高亮模式</button>
+          <button data-mode="underline">划线模式</button>
+          <button data-mode="pen">画笔模式</button>
+          <button data-mode="eraser">删除模式</button>
+        </div>
+        <p class="hint">浏览模式：不标注；高亮/划线模式：框选文字后弹出颜色菜单；画笔模式：拖动绘制；删除模式：点击标注删除。</p>
+        <label>
+          默认高亮颜色
+          <input id="highlightColor" type="color" value="#ffe600">
+        </label>
+        <label>
+          高亮颜色菜单
+          <input id="highlightPalette" type="text" value="#ffe600,#7cff7c,#74c0fc,#ffadad">
+        </label>
+        <label>
+          高亮快捷键
+          <input id="highlightShortcut" type="text" value="Alt+H">
+        </label>
+        <label>
+          笔迹颜色
+          <input id="penColor" type="color" value="#e53935">
+        </label>
+        <label>
+          笔宽
+          <input id="penWidth" type="range" min="1" max="16" value="4">
+        </label>
+        <p id="counts" class="hint">正在读取当前页面状态…</p>
+        <button id="clearPage" class="danger">清空当前网页标注</button>
+        <button id="cleanupLocal">清理过期本地数据</button>
+      </section>
+
+      <section>
+        <h2>坚果云同步</h2>
+        <label>
+          WebDAV 目录
+          <input id="davUrl" type="url" placeholder="https://dav.jianguoyun.com/dav/web-highlight">
+        </label>
+        <label>
+          坚果云账号
+          <input id="username" type="email" autocomplete="username">
+        </label>
+        <label>
+          应用密码
+          <input id="password" type="password" autocomplete="current-password">
+        </label>
+        <label class="checkbox">
+          <input id="enabled" type="checkbox">
+          启用异步同步
+        </label>
+        <button id="saveSync">保存同步设置</button>
+        <p class="hint">建议在坚果云安全设置里创建“第三方应用管理”的应用密码。</p>
+      </section>
+
+      <p id="status" aria-live="polite"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

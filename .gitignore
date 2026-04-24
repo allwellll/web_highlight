@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Local browser/runtime profiles
+.edge-home/
+.edge-profile/
+.playwright-mcp/
+
+# Temporary outputs
+*.log
+.tmp/
