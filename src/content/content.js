@@ -164,6 +164,7 @@ function getCurrentSelectionData() {
     ...offsets,
     text: selectedText,
     anchor: createTextAnchor(range, offsets, selectedText),
+    visualAnchor: createVisualAnchor(range),
     rect: selectionRect(range)
   };
 }
@@ -178,6 +179,7 @@ function addTextAnnotation(selectionData, color, type = state.mode) {
     start: selectionData.start,
     end: selectionData.end,
     anchor: selectionData.anchor,
+    visualAnchor: selectionData.visualAnchor,
     createdAt: Date.now()
   });
   clearSelection();
@@ -384,12 +386,12 @@ function renderTextAnnotations() {
   const textIndex = createTextIndex();
   for (const highlight of pageData.highlights) {
     const range = annotationToRange(highlight, textIndex);
-    if (!range) continue;
-    if (useNativeHighlights) {
+    const rectResult = annotationRects(highlight, range);
+    if (!rectResult.rects.length) continue;
+    if (range && useNativeHighlights && !rectResult.usedVisualAnchor) {
       renderNativeTextAnnotation(highlight, range, nativeRules);
     }
-    for (const rect of range.getClientRects()) {
-      if (rect.width < 1 || rect.height < 1) continue;
+    for (const rect of rectResult.rects) {
       const node = document.createElement("div");
       const typeClass = annotationType(highlight) === "underline" ? "whl-underline" : "whl-highlight";
       node.className = `whl-text-mark ${typeClass}${useNativeHighlights ? " whl-native-hitbox" : ""}`;
@@ -406,6 +408,43 @@ function renderTextAnnotations() {
   }
   nativeHighlightStyle.textContent = nativeRules.join("\n");
   highlightLayer.appendChild(fragment);
+}
+
+
+function annotationRects(annotation, range) {
+  if (range) {
+    const rects = clientRects(range);
+    if (rects.length) return { rects, usedVisualAnchor: false };
+  }
+  const visualRects = visualAnchorRects(annotation.visualAnchor);
+  return { rects: visualRects, usedVisualAnchor: visualRects.length > 0 };
+}
+
+function clientRects(range) {
+  return [...range.getClientRects()].filter((rect) => rect.width >= 1 && rect.height >= 1);
+}
+
+function visualAnchorRects(visualAnchor) {
+  if (visualAnchor?.type !== "katex" || !Array.isArray(visualAnchor.rects)) return [];
+  const root = visualAnchorRoot(visualAnchor);
+  if (!root) return [];
+  const rootRect = root.getBoundingClientRect();
+  return visualAnchor.rects
+    .filter((rect) => rect.width >= 1 && rect.height >= 1)
+    .map((rect) => ({
+      left: rootRect.left + rect.left,
+      top: rootRect.top + rect.top,
+      width: rect.width,
+      height: rect.height
+    }));
+}
+
+function visualAnchorRoot(visualAnchor) {
+  const direct = elementFromPath(visualAnchor.rootPath);
+  if (direct?.matches?.(".katex")) return direct;
+  const roots = [...document.querySelectorAll(".katex")];
+  return roots.find((root) => root.textContent === visualAnchor.rootText)
+    || roots.find((root) => root.textContent?.includes(visualAnchor.selectedText || ""));
 }
 
 function supportsNativeHighlights() {
@@ -607,6 +646,30 @@ function contextScore(actual, expected, side) {
   return matched / Math.max(1, Math.min(expected.length, ANCHOR_CONTEXT_CHARS));
 }
 
+
+function elementPath(element) {
+  const path = [];
+  let current = element;
+  while (current && current !== document.body) {
+    const parent = current.parentNode;
+    if (!parent) return null;
+    path.unshift([...parent.children].indexOf(current));
+    current = parent;
+  }
+  return current === document.body ? path.join(".") : null;
+}
+
+function elementFromPath(path) {
+  if (typeof path !== "string") return null;
+  let current = document.body;
+  for (const segment of path.split(".").filter(Boolean)) {
+    const index = Number(segment);
+    if (!Number.isInteger(index) || !current?.children?.[index]) return null;
+    current = current.children[index];
+  }
+  return current?.nodeType === Node.ELEMENT_NODE ? current : null;
+}
+
 function nodePath(node) {
   const path = [];
   let current = node;
@@ -666,6 +729,39 @@ function resizeLayers() {
   highlightLayer.style.height = `${height}px`;
   penLayer.setAttribute("width", width);
   penLayer.setAttribute("height", height);
+}
+
+
+function createVisualAnchor(range) {
+  const root = closestRangeElement(range, ".katex");
+  if (!root) return null;
+  const rootRect = root.getBoundingClientRect();
+  const rects = clientRects(range).map((rect) => ({
+    left: rect.left - rootRect.left,
+    top: rect.top - rootRect.top,
+    width: rect.width,
+    height: rect.height
+  }));
+  if (!rects.length) return null;
+  return {
+    version: 1,
+    type: "katex",
+    rootPath: elementPath(root),
+    rootText: root.textContent || "",
+    selectedText: range.toString(),
+    rects
+  };
+}
+
+function closestRangeElement(range, selector) {
+  return closestElement(range.commonAncestorContainer, selector)
+    || closestElement(range.startContainer, selector)
+    || closestElement(range.endContainer, selector);
+}
+
+function closestElement(node, selector) {
+  const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  return element?.closest?.(selector) || null;
 }
 
 function selectionRect(range) {
