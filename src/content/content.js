@@ -11,6 +11,8 @@ const ANCHOR_CONTEXT_CHARS = 80;
 const MAX_TEXT_CANDIDATES = 80;
 const MIN_ANCHOR_SCORE = 64;
 const STATE_VERSION = 2;
+const DYNAMIC_RENDER_DELAY = 300;
+const SCROLL_RENDER_DELAY = 500;
 const DEBUG_HOSTS = ["ns01.plusai.io"];
 const DEBUG_ENABLED = DEBUG_HOSTS.includes(location.hostname);
 const DEFAULT_STATE = {
@@ -37,6 +39,11 @@ let currentStroke = null;
 let currentPath = null;
 let saveTimer = null;
 let selectionChangeTimer = null;
+let dynamicRenderTimer = null;
+let scrollRenderTimer = null;
+let isScrolling = false;
+let mutationObserver = null;
+let resizeObserver = null;
 let suppressSelectionMenuUntil = 0;
 
 init();
@@ -49,6 +56,7 @@ async function init() {
   applyModeClass();
   renderAll();
   bindEvents();
+  bindDynamicRenderEvents();
   requestRemoteData();
 }
 
@@ -61,7 +69,9 @@ function bindEvents() {
   document.addEventListener("keydown", handleKeydown, true);
   document.addEventListener("visibilitychange", ensureOverlayNodesConnected);
   window.addEventListener("focus", ensureOverlayNodesConnected);
-  window.addEventListener("resize", debounce(renderAll, 150));
+  window.addEventListener("resize", () => scheduleDynamicRender("window resize"));
+  document.addEventListener("load", handleResourceLoad, true);
+  document.addEventListener("scroll", handleDocumentScroll, true);
 
   penLayer.addEventListener("pointerdown", startPenStroke);
   penLayer.addEventListener("pointermove", continuePenStroke);
@@ -102,6 +112,85 @@ function bindEvents() {
 
     return false;
   });
+}
+
+function bindDynamicRenderEvents() {
+  mutationObserver?.disconnect();
+  mutationObserver = new MutationObserver(handleDocumentMutations);
+  mutationObserver.observe(document.documentElement, {
+    childList: true,
+    characterData: true,
+    subtree: true
+  });
+
+  if (!globalThis.ResizeObserver) return;
+  resizeObserver?.disconnect();
+  resizeObserver = new ResizeObserver(() => scheduleDynamicRender("layout resize"));
+  resizeObserver.observe(document.documentElement);
+  if (document.body) resizeObserver.observe(document.body);
+}
+
+function handleDocumentMutations(records) {
+  if (!records.some(isExternalMutation)) return;
+  scheduleDynamicRender("dom mutation");
+}
+
+function handleResourceLoad(event) {
+  if (!event.target?.matches?.("img, iframe, video, audio, source")) return;
+  scheduleDynamicRender("resource load");
+}
+
+function scheduleDynamicRender(reason) {
+  clearTimeout(dynamicRenderTimer);
+  dynamicRenderTimer = setTimeout(() => {
+    debugLog("dynamic render", { reason });
+    renderAll();
+  }, DYNAMIC_RENDER_DELAY);
+}
+
+function handleDocumentScroll() {
+  if (!pageData.highlights.length && !pageData.strokes.length) return;
+  isScrolling = true;
+  hideScrollableOverlayDuringScroll();
+  clearTimeout(scrollRenderTimer);
+  scrollRenderTimer = setTimeout(() => {
+    isScrolling = false;
+    debugLog("scroll render");
+    renderAll();
+    showScrollableOverlayAfterScroll();
+  }, SCROLL_RENDER_DELAY);
+}
+
+function hideScrollableOverlayDuringScroll() {
+  if (!highlightLayer) return;
+  highlightLayer.style.setProperty("visibility", "hidden", "important");
+  highlightLayer.style.setProperty("pointer-events", "none", "important");
+}
+
+function showScrollableOverlayAfterScroll() {
+  if (!highlightLayer || isScrolling) return;
+  highlightLayer.style.removeProperty("visibility");
+  highlightLayer.style.removeProperty("pointer-events");
+}
+
+function isExternalMutation(record) {
+  if (isWhlNode(record.target)) return false;
+  const addedNodes = [...record.addedNodes];
+  const removedNodes = [...record.removedNodes];
+  if (removedNodes.some(isOverlayRootNode)) return true;
+  const changedNodes = [...addedNodes, ...removedNodes];
+  return changedNodes.length === 0 || changedNodes.some((node) => !isWhlNode(node));
+}
+
+function isWhlNode(node) {
+  if (!node) return false;
+  if (node === highlightLayer || node === penLayer || node === selectionMenu || node === annotationMenu || node === nativeHighlightStyle) return true;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  return Boolean(element?.closest?.(".whl-layer, .whl-pen-layer, .whl-selection-menu, .whl-annotation-menu, [data-whl-native-highlights]"));
+}
+
+function isOverlayRootNode(node) {
+  return node === highlightLayer || node === penLayer || node === selectionMenu || node === annotationMenu || node === nativeHighlightStyle;
 }
 
 function createLayers() {
@@ -576,6 +665,7 @@ function renderAll() {
   resizeLayers();
   renderTextAnnotations();
   renderStrokes();
+  showScrollableOverlayAfterScroll();
 }
 
 function renderTextAnnotations() {
@@ -628,7 +718,7 @@ function clientRects(range) {
 }
 
 function visualAnchorRects(visualAnchor) {
-  if (visualAnchor?.type !== "katex" || !Array.isArray(visualAnchor.rects)) return [];
+  if (!["katex", "range"].includes(visualAnchor?.type) || !Array.isArray(visualAnchor.rects)) return [];
   const root = visualAnchorRoot(visualAnchor);
   if (!root) return [];
   const rootRect = root.getBoundingClientRect();
@@ -644,7 +734,7 @@ function visualAnchorRects(visualAnchor) {
 
 function visualAnchorRoot(visualAnchor) {
   const direct = elementFromPath(visualAnchor.rootPath);
-  if (direct?.matches?.(".katex")) return direct;
+  if (direct && (visualAnchor.type === "range" || direct.matches?.(".katex"))) return direct;
   const roots = [...document.querySelectorAll(".katex")];
   return roots.find((root) => root.textContent === visualAnchor.rootText)
     || roots.find((root) => root.textContent?.includes(visualAnchor.selectedText || ""));
@@ -942,10 +1032,11 @@ function resizeLayers() {
 
 
 function createVisualAnchor(range) {
-  const root = closestRangeElement(range, ".katex");
-  if (!root) return null;
+  const formulaRoot = closestRangeElement(range, ".katex") || intersectedElement(range, ".katex");
+  if (!formulaRoot) return null;
+  const root = closestRangeElement(range, ".katex") || visualRangeRoot(range) || formulaRoot;
   const rootRect = root.getBoundingClientRect();
-  const rects = clientRects(range).map((rect) => ({
+  const rects = visualClientRects(range).map((rect) => ({
     left: rect.left - rootRect.left,
     top: rect.top - rootRect.top,
     width: rect.width,
@@ -954,12 +1045,41 @@ function createVisualAnchor(range) {
   if (!rects.length) return null;
   return {
     version: 1,
-    type: "katex",
+    type: root.matches?.(".katex") ? "katex" : "range",
     rootPath: elementPath(root),
     rootText: root.textContent || "",
     selectedText: range.toString(),
     rects
   };
+}
+
+function visualClientRects(range) {
+  return clientRects(range).filter((rect) => rect.width > 2 && rect.height > 2);
+}
+
+function intersectedElement(range, selector) {
+  const scope = range.commonAncestorContainer?.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer?.parentElement;
+  const candidates = scope?.querySelectorAll ? scope.querySelectorAll(selector) : document.querySelectorAll(selector);
+  for (const element of candidates) {
+    try {
+      if (range.intersectsNode(element)) return element;
+    } catch (_error) {
+    }
+  }
+  return null;
+}
+
+function visualRangeRoot(range) {
+  let element = range.commonAncestorContainer?.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer?.parentElement;
+  while (element && element !== document.body) {
+    if (elementPath(element)) return element;
+    element = element.parentElement;
+  }
+  return document.body;
 }
 
 function closestRangeElement(range, selector) {
