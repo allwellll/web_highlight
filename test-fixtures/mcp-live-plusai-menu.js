@@ -1,6 +1,5 @@
 async (page) => {
   await page.goto('https://ns01.plusai.io/c/69eb2f35-cd08-8330-aef1-9a548a3f7866', { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('.katex', { timeout: 10000 });
   await page.addStyleTag({ path: '/Users/wangyaqi49/code_room/web_highlight/src/content/content.css' });
   await page.evaluate(() => {
     window.__whlStore = {};
@@ -25,20 +24,25 @@ async (page) => {
   await page.waitForTimeout(500);
   await page.evaluate(() => new Promise((resolve) => window.__whlListener({ type: 'WHL_SET_MODE', state: { mode: 'highlight', highlightColor: '#ffe600', highlightPalette: ['#ffe600'] } }, null, resolve)));
 
-  const first = await page.evaluate(async () => {
+  const result = await page.evaluate(async () => {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const katex = document.querySelector('.katex');
-    const textNode = document.createTreeWalker(katex, NodeFilter.SHOW_TEXT, {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT;
-        if (node.parentElement?.closest('.katex-mathml')) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
+        const parent = node.parentElement;
+        if (!parent || parent.closest('script, style, noscript, template, .katex-mathml')) return NodeFilter.FILTER_REJECT;
+        const rect = parent.getBoundingClientRect();
+        return rect.width > 20 && rect.height > 8 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       }
-    }).nextNode();
-    if (!textNode) return { error: 'no katex text node' };
+    });
+    const node = walker.nextNode();
+    if (!node) return { error: 'no text node' };
+    const text = node.nodeValue;
+    const start = Math.max(0, text.search(/\S/));
+    const end = Math.min(text.length, start + 8);
     const range = document.createRange();
-    range.setStart(textNode, 0);
-    range.setEnd(textNode, Math.min(textNode.nodeValue.length, 1));
+    range.setStart(node, start);
+    range.setEnd(node, end);
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
@@ -46,17 +50,14 @@ async (page) => {
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     await sleep(220);
     const menu = document.querySelector('.whl-selection-menu');
-    menu?.querySelector('.whl-color-button')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-    await sleep(450);
-    const key = Object.keys(window.__whlStore).find((item) => item.startsWith('whl:page:'));
-    const saved = window.__whlStore[key];
+    const rect = menu?.getBoundingClientRect();
     return {
-      selectedText: textNode.nodeValue,
+      selected: selection.toString(),
       menuShown: Boolean(menu && !menu.hidden),
-      markCount: document.querySelectorAll('.whl-highlight').length,
-      savedCount: saved?.highlights?.length || 0,
-      hasVisualAnchor: Boolean(saved?.highlights?.[0]?.visualAnchor)
+      buttonCount: menu?.querySelectorAll('.whl-color-button').length || 0,
+      menuRect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
+      ignoredScriptNodes: [...document.querySelectorAll('script')].reduce((sum, el) => sum + (el.textContent?.length || 0), 0)
     };
   });
-  return first;
+  return result;
 }

@@ -1,4 +1,6 @@
 (() => {
+if (globalThis.__WHL_CONTENT_LOADED__) return;
+globalThis.__WHL_CONTENT_LOADED__ = true;
 const STORAGE_PREFIX = "whl:page:";
 const STORAGE_INDEX_KEY = "whl:index";
 const MAX_LOCAL_PAGES = 500;
@@ -8,13 +10,18 @@ const PEN_MAX_POINTS = 3000;
 const ANCHOR_CONTEXT_CHARS = 80;
 const MAX_TEXT_CANDIDATES = 80;
 const MIN_ANCHOR_SCORE = 64;
+const STATE_VERSION = 2;
+const DEBUG_HOSTS = ["ns01.plusai.io"];
+const DEBUG_ENABLED = DEBUG_HOSTS.includes(location.hostname);
 const DEFAULT_STATE = {
-  mode: "browse",
+  mode: "highlight",
   highlightColor: "#ffe600",
   highlightPalette: ["#ffe600", "#7cff7c", "#74c0fc", "#ffadad"],
   highlightShortcut: "Alt+H",
   penColor: "#e53935",
-  penWidth: 4
+  penWidth: 4,
+  modePinned: false,
+  version: STATE_VERSION
 };
 
 let state = { ...DEFAULT_STATE };
@@ -29,6 +36,8 @@ let pendingSelection = null;
 let currentStroke = null;
 let currentPath = null;
 let saveTimer = null;
+let selectionChangeTimer = null;
+let suppressSelectionMenuUntil = 0;
 
 init();
 
@@ -45,9 +54,13 @@ async function init() {
 
 function bindEvents() {
   document.addEventListener("mouseup", handleSelection, true);
+  document.addEventListener("selectionchange", scheduleSelectionMenu);
+  document.addEventListener("pointerdown", handleDocumentPointerDown, true);
   document.addEventListener("mousedown", handleDocumentMouseDown, true);
   document.addEventListener("click", handleDocumentClick, true);
   document.addEventListener("keydown", handleKeydown, true);
+  document.addEventListener("visibilitychange", ensureOverlayNodesConnected);
+  window.addEventListener("focus", ensureOverlayNodesConnected);
   window.addEventListener("resize", debounce(renderAll, 150));
 
   penLayer.addEventListener("pointerdown", startPenStroke);
@@ -59,14 +72,17 @@ function bindEvents() {
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "WHL_SET_MODE") {
+      debugLog("message received: WHL_SET_MODE", { incomingState: message.state, previousMode: state.mode });
       state = { ...state, ...message.state };
       persistState();
       applyModeClass();
+      debugLog("mode applied", { mode: state.mode, modePinned: state.modePinned });
       sendResponse({ ok: true, state });
       return false;
     }
 
     if (message?.type === "WHL_GET_STATUS") {
+      debugLog("message received: WHL_GET_STATUS", { mode: state.mode, counts: counts() });
       sendResponse({ ok: true, state, counts: counts() });
       return false;
     }
@@ -91,33 +107,48 @@ function bindEvents() {
 function createLayers() {
   highlightLayer = document.createElement("div");
   highlightLayer.className = "whl-layer";
-  document.documentElement.appendChild(highlightLayer);
 
   penLayer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   penLayer.classList.add("whl-pen-layer");
-  document.documentElement.appendChild(penLayer);
 
   selectionMenu = document.createElement("div");
   selectionMenu.className = "whl-selection-menu";
   selectionMenu.hidden = true;
-  document.documentElement.appendChild(selectionMenu);
 
   annotationMenu = document.createElement("div");
   annotationMenu.className = "whl-annotation-menu";
   annotationMenu.hidden = true;
   annotationMenu.innerHTML = '<button type="button" data-action="delete">删除</button>';
   annotationMenu.addEventListener("click", handleAnnotationMenuClick);
-  document.documentElement.appendChild(annotationMenu);
 
   nativeHighlightStyle = document.createElement("style");
   nativeHighlightStyle.dataset.whlNativeHighlights = "true";
-  document.documentElement.appendChild(nativeHighlightStyle);
+  ensureOverlayNodesConnected();
   resizeLayers();
+}
+
+function ensureOverlayNodesConnected() {
+  const root = document.body || document.documentElement;
+  const nodes = [highlightLayer, penLayer, selectionMenu, annotationMenu, nativeHighlightStyle].filter(Boolean);
+  for (const node of nodes) {
+    if (node.isConnected && node.ownerDocument === document) continue;
+    root.appendChild(node);
+    debugLog("overlay node reattached", { node: debugNode(node), root: debugNode(root) });
+  }
 }
 
 async function loadState() {
   const stored = await chrome.storage.local.get("whlState");
-  state = { ...DEFAULT_STATE, ...(stored.whlState || {}) };
+  state = normalizeState(stored.whlState);
+  if (!stored.whlState || stored.whlState.version !== STATE_VERSION) await persistState();
+}
+
+function normalizeState(value) {
+  const next = { ...DEFAULT_STATE, ...(value || {}), version: STATE_VERSION };
+  if (!value?.modePinned && value?.mode === "browse") {
+    next.mode = "highlight";
+  }
+  return next;
 }
 
 async function persistState() {
@@ -142,29 +173,95 @@ function requestRemoteData() {
 }
 
 function handleSelection(event) {
-  if (selectionMenu.contains(event.target) || annotationMenu.contains(event.target)) return;
-  if (!isTextMode()) return;
-  const selectionData = getCurrentSelectionData();
+  if (event?.target && (selectionMenu.contains(event.target) || annotationMenu.contains(event.target))) {
+    debugLog("selection ignored: menu target", debugEventTarget(event.target));
+    return;
+  }
+  debugLog("mouseup selection check", { mode: state.mode, target: debugEventTarget(event?.target) });
+  showSelectionMenuFromCurrentSelection("mouseup");
+}
+
+function scheduleSelectionMenu() {
+  clearTimeout(selectionChangeTimer);
+  debugLog("selectionchange scheduled", debugSelectionSnapshot());
+  selectionChangeTimer = setTimeout(() => showSelectionMenuFromCurrentSelection("selectionchange"), 80);
+}
+
+function showSelectionMenuFromCurrentSelection(source = "unknown") {
+  ensureOverlayNodesConnected();
+  if (Date.now() < suppressSelectionMenuUntil) {
+    debugLog("menu skipped: recently dismissed", { source, suppressSelectionMenuUntil });
+    return;
+  }
+  if (!isTextMode()) {
+    debugLog("menu skipped: not text mode", { source, mode: state.mode });
+    return;
+  }
+  const selectionData = getCurrentSelectionData(source);
   if (!selectionData) return;
   pendingSelection = selectionData;
+  debugLog("menu render requested", {
+    source,
+    mode: state.mode,
+    textLength: selectionData.text.length,
+    textPreview: selectionData.text.slice(0, 60),
+    rect: debugRect(selectionData.rect),
+    hasOffsets: Number.isInteger(selectionData.start) && Number.isInteger(selectionData.end),
+    hasVisualAnchor: Boolean(selectionData.visualAnchor)
+  });
   renderSelectionMenu(selectionData.rect, state.mode);
 }
 
-function getCurrentSelectionData() {
+function getCurrentSelectionData(source = "unknown") {
   const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  if (!selection) {
+    debugLog("selection skipped: no selection", { source });
+    return null;
+  }
+  if (selection.rangeCount === 0) {
+    debugLog("selection skipped: no range", { source, ...debugSelectionSnapshot(selection) });
+    return null;
+  }
+  if (selection.isCollapsed) {
+    debugLog("selection skipped: collapsed", { source, ...debugSelectionSnapshot(selection) });
+    hideSelectionMenuIfSafe();
+    return null;
+  }
   const range = selection.getRangeAt(0);
-  if (!document.body.contains(range.commonAncestorContainer)) return;
-
-  const offsets = rangeToOffsets(range);
-  if (!offsets || offsets.start === offsets.end) return null;
+  if (!document.body.contains(range.commonAncestorContainer)) {
+    debugLog("selection skipped: outside body", {
+      source,
+      commonAncestor: debugNode(range.commonAncestorContainer),
+      start: debugNode(range.startContainer),
+      end: debugNode(range.endContainer)
+    });
+    return null;
+  }
 
   const selectedText = selection.toString();
+  const visualAnchor = createVisualAnchor(range);
+  const offsets = rangeToOffsets(range);
+  if ((!offsets || offsets.start === offsets.end) && !visualAnchor) {
+    debugLog("selection skipped: no usable anchor", {
+      source,
+      textLength: selectedText.length,
+      textPreview: selectedText.slice(0, 60),
+      offsets,
+      hasVisualAnchor: Boolean(visualAnchor),
+      rect: debugRect(selectionRect(range)),
+      commonAncestor: debugNode(range.commonAncestorContainer),
+      start: debugNode(range.startContainer),
+      end: debugNode(range.endContainer)
+    });
+    return null;
+  }
+
   return {
-    ...offsets,
+    start: offsets?.start,
+    end: offsets?.end,
     text: selectedText,
-    anchor: createTextAnchor(range, offsets, selectedText),
-    visualAnchor: createVisualAnchor(range),
+    anchor: offsets ? createTextAnchor(range, offsets, selectedText) : null,
+    visualAnchor,
     rect: selectionRect(range)
   };
 }
@@ -285,10 +382,16 @@ function handleDocumentClick(event) {
 function handleDocumentMouseDown(event) {
   if (!annotationMenu.hidden && !annotationMenu.contains(event.target)) hideAnnotationMenu();
   if (selectionMenu.hidden || selectionMenu.contains(event.target)) return;
-  hideSelectionMenu();
+  dismissSelectionMenu();
+}
+
+function handleDocumentPointerDown(event) {
+  if (selectionMenu.hidden || selectionMenu.contains(event.target)) return;
+  dismissSelectionMenu();
 }
 
 function renderSelectionMenu(rect, type) {
+  ensureOverlayNodesConnected();
   selectionMenu.textContent = "";
   const colors = normalizedPalette();
   for (const color of colors) {
@@ -297,6 +400,7 @@ function renderSelectionMenu(rect, type) {
     button.className = "whl-color-button";
     button.style.backgroundColor = color;
     button.title = `${type === "underline" ? "划线" : "高亮"}为 ${color}`;
+    applyColorButtonCriticalStyle(button, color);
     button.addEventListener("mousedown", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -309,6 +413,7 @@ function renderSelectionMenu(rect, type) {
   customColor.type = "color";
   customColor.value = state.highlightColor;
   customColor.title = `自定义${type === "underline" ? "划线" : "高亮"}颜色`;
+  applyColorButtonCriticalStyle(customColor);
   customColor.addEventListener("input", () => {
     state = { ...state, highlightColor: customColor.value };
     persistState();
@@ -317,13 +422,106 @@ function renderSelectionMenu(rect, type) {
   selectionMenu.appendChild(customColor);
 
   selectionMenu.hidden = false;
-  selectionMenu.style.left = `${Math.max(8, rect.left + window.scrollX)}px`;
-  selectionMenu.style.top = `${Math.max(8, rect.bottom + window.scrollY + 6)}px`;
+  applySelectionMenuCriticalStyle();
+  positionFloatingMenu(selectionMenu, rect);
+  debugLog("menu rendered", {
+    type,
+    colorCount: colors.length,
+    childCount: selectionMenu.children.length,
+    hidden: selectionMenu.hidden,
+    rect: debugRect(selectionMenu.getBoundingClientRect()),
+    position: { left: selectionMenu.style.left, top: selectionMenu.style.top },
+    computed: debugComputedStyle(selectionMenu),
+    firstButton: debugMenuChild(selectionMenu.firstElementChild)
+  });
+}
+
+function applySelectionMenuCriticalStyle() {
+  setImportantStyles(selectionMenu, {
+    alignItems: "center",
+    background: "rgba(32, 33, 36, 0.96)",
+    border: "0",
+    borderRadius: "999px",
+    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.24)",
+    boxSizing: "border-box",
+    display: "flex",
+    flexDirection: "row",
+    gap: "8px",
+    height: "40px",
+    minHeight: "40px",
+    minWidth: "176px",
+    opacity: "1",
+    overflow: "visible",
+    padding: "8px 10px",
+    pointerEvents: "auto",
+    position: "fixed",
+    transform: "none",
+    visibility: "visible",
+    width: "max-content",
+    zIndex: "2147483647"
+  });
+}
+
+function applyColorButtonCriticalStyle(element, color) {
+  setImportantStyles(element, {
+    appearance: "auto",
+    background: color || "transparent",
+    border: "2px solid rgba(255, 255, 255, 0.82)",
+    borderRadius: "50%",
+    boxSizing: "border-box",
+    cursor: "pointer",
+    display: "inline-block",
+    flex: "0 0 auto",
+    height: "24px",
+    minHeight: "24px",
+    minWidth: "24px",
+    opacity: "1",
+    padding: "0",
+    visibility: "visible",
+    width: "24px"
+  });
+}
+
+function setImportantStyles(element, styles) {
+  for (const [property, value] of Object.entries(styles)) {
+    element.style.setProperty(kebabCase(property), value, "important");
+  }
+}
+
+function kebabCase(value) {
+  return value.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`);
+}
+
+function positionFloatingMenu(menu, anchorRect) {
+  const margin = 8;
+  const gap = 6;
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const menuRect = menu.getBoundingClientRect();
+  const maxLeft = Math.max(margin, window.innerWidth - menuRect.width - margin);
+  const maxTop = Math.max(margin, window.innerHeight - menuRect.height - margin);
+  const preferredLeft = anchorRect.left;
+  const preferredTop = anchorRect.bottom + gap;
+  const fallbackTop = anchorRect.top - menuRect.height - gap;
+  const top = preferredTop <= maxTop ? preferredTop : fallbackTop;
+  menu.style.left = `${clamp(preferredLeft, margin, maxLeft)}px`;
+  menu.style.top = `${clamp(top, margin, maxTop)}px`;
 }
 
 function hideSelectionMenu() {
   pendingSelection = null;
   selectionMenu.hidden = true;
+}
+
+function dismissSelectionMenu() {
+  suppressSelectionMenuUntil = Date.now() + 350;
+  hideSelectionMenu();
+}
+
+function hideSelectionMenuIfSafe() {
+  if (selectionMenu.hidden) return;
+  if (selectionMenu.matches(":hover") || selectionMenu.contains(document.activeElement)) return;
+  hideSelectionMenu();
 }
 
 function clearSelection() {
@@ -372,6 +570,7 @@ function removeAnnotation(id) {
 }
 
 function renderAll() {
+  ensureOverlayNodesConnected();
   resizeLayers();
   renderTextAnnotations();
   renderStrokes();
@@ -388,13 +587,14 @@ function renderTextAnnotations() {
     const range = annotationToRange(highlight, textIndex);
     const rectResult = annotationRects(highlight, range);
     if (!rectResult.rects.length) continue;
-    if (range && useNativeHighlights && !rectResult.usedVisualAnchor) {
+    const usesNativeHighlight = range && useNativeHighlights && !rectResult.usedVisualAnchor;
+    if (usesNativeHighlight) {
       renderNativeTextAnnotation(highlight, range, nativeRules);
     }
     for (const rect of rectResult.rects) {
       const node = document.createElement("div");
       const typeClass = annotationType(highlight) === "underline" ? "whl-underline" : "whl-highlight";
-      node.className = `whl-text-mark ${typeClass}${useNativeHighlights ? " whl-native-hitbox" : ""}`;
+      node.className = `whl-text-mark ${typeClass}${usesNativeHighlight ? " whl-native-hitbox" : ""}${rectResult.usedVisualAnchor ? " whl-visual-anchor" : ""}`;
       node.dataset.whlId = highlight.id;
       node.title = "点击打开操作菜单";
       node.style.setProperty("--whl-color", highlight.color || DEFAULT_STATE.highlightColor);
@@ -412,12 +612,13 @@ function renderTextAnnotations() {
 
 
 function annotationRects(annotation, range) {
+  const visualRects = visualAnchorRects(annotation.visualAnchor);
+  if (visualRects.length) return { rects: visualRects, usedVisualAnchor: true };
   if (range) {
     const rects = clientRects(range);
     if (rects.length) return { rects, usedVisualAnchor: false };
   }
-  const visualRects = visualAnchorRects(annotation.visualAnchor);
-  return { rects: visualRects, usedVisualAnchor: visualRects.length > 0 };
+  return { rects: [], usedVisualAnchor: false };
 }
 
 function clientRects(range) {
@@ -502,6 +703,7 @@ function rangeToOffsets(range) {
     const node = textIndex.nodes[index];
     if (node === range.startContainer) start = textIndex.starts[index] + range.startOffset;
     if (node === range.endContainer) end = textIndex.starts[index] + range.endOffset;
+    if (Number.isInteger(start) && Number.isInteger(end)) break;
   }
   return Number.isInteger(start) && Number.isInteger(end) ? { start, end } : null;
 }
@@ -705,12 +907,17 @@ function textWalker() {
   return document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-      if (highlightLayer.contains(node.parentElement) || penLayer.contains(node.parentElement)) {
-        return NodeFilter.FILTER_REJECT;
-      }
+      if (isIgnoredTextNode(node)) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     }
   });
+}
+
+function isIgnoredTextNode(node) {
+  const parent = node.parentElement;
+  if (!parent) return true;
+  if (highlightLayer.contains(parent) || penLayer.contains(parent)) return true;
+  return Boolean(parent.closest("script, style, noscript, template, .katex-mathml, .whl-selection-menu, .whl-annotation-menu"));
 }
 
 function applyModeClass() {
@@ -955,6 +1162,10 @@ function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
 function findNearestStroke(point, threshold) {
   let nearest = null;
   let bestDistance = Infinity;
@@ -985,6 +1196,89 @@ function hexToRgba(hex, alpha) {
   const green = (number >> 8) & 255;
   const blue = number & 255;
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function debugLog(message, data = {}) {
+  if (!DEBUG_ENABLED) return;
+  console.info(`[WHL][${new Date().toISOString()}] ${message}`, data);
+}
+
+function debugSelectionSnapshot(selection = window.getSelection?.()) {
+  if (!selection) return { hasSelection: false };
+  return {
+    hasSelection: true,
+    rangeCount: selection.rangeCount,
+    collapsed: selection.isCollapsed,
+    textLength: selection.toString().length,
+    textPreview: selection.toString().slice(0, 60),
+    activeElement: debugNode(document.activeElement)
+  };
+}
+
+function debugEventTarget(target) {
+  return debugNode(target);
+}
+
+function debugNode(node) {
+  if (!node) return null;
+  if (node.nodeType === Node.TEXT_NODE) {
+    return {
+      type: 'text',
+      textLength: node.nodeValue?.length || 0,
+      textPreview: node.nodeValue?.slice(0, 40) || '',
+      parent: debugNode(node.parentElement)
+    };
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return { type: `node-${node.nodeType}` };
+  const element = node;
+  return {
+    type: element.tagName?.toLowerCase(),
+    id: element.id || '',
+    className: String(element.className || '').slice(0, 120),
+    role: element.getAttribute?.('role') || '',
+    contentEditable: element.getAttribute?.('contenteditable') || '',
+    rect: debugRect(element.getBoundingClientRect?.())
+  };
+}
+
+function debugRect(rect) {
+  if (!rect) return null;
+  return {
+    left: Math.round(rect.left),
+    top: Math.round(rect.top),
+    right: Math.round(rect.right),
+    bottom: Math.round(rect.bottom),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+  };
+}
+
+function debugComputedStyle(element) {
+  if (!element) return null;
+  const style = getComputedStyle(element);
+  return {
+    display: style.display,
+    position: style.position,
+    visibility: style.visibility,
+    opacity: style.opacity,
+    width: style.width,
+    height: style.height,
+    minWidth: style.minWidth,
+    minHeight: style.minHeight,
+    padding: style.padding,
+    overflow: style.overflow,
+    pointerEvents: style.pointerEvents,
+    zIndex: style.zIndex
+  };
+}
+
+function debugMenuChild(element) {
+  if (!element) return null;
+  return {
+    tag: element.tagName?.toLowerCase(),
+    rect: debugRect(element.getBoundingClientRect()),
+    computed: debugComputedStyle(element)
+  };
 }
 
 function debounce(fn, delay) {

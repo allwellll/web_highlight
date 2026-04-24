@@ -1,4 +1,6 @@
 const modeButtons = [...document.querySelectorAll("[data-mode]")];
+const POPUP_DEBUG_HOSTS = ["ns01.plusai.io"];
+
 const inputs = {
   highlightColor: document.querySelector("#highlightColor"),
   highlightPalette: document.querySelector("#highlightPalette"),
@@ -27,15 +29,7 @@ async function init() {
     return;
   }
 
-  chrome.tabs.sendMessage(tab.id, { type: "WHL_GET_STATUS" }, (response) => {
-    if (chrome.runtime.lastError || !response?.ok) {
-      setStatus("当前页面暂不支持标注，请刷新后重试");
-      return;
-    }
-    currentState = response.state;
-    syncStateToForm(response.state);
-    renderCounts(response.counts);
-  });
+  getContentStatus(tab.id);
 
   chrome.runtime.sendMessage({ type: "WHL_GET_SYNC_CONFIG" }, (config) => {
     inputs.davUrl.value = config?.davUrl || "";
@@ -45,7 +39,7 @@ async function init() {
   });
 
   modeButtons.forEach((button) => {
-    button.addEventListener("click", () => updateContentState(tab.id, { mode: button.dataset.mode }));
+    button.addEventListener("click", () => updateContentState(tab.id, { mode: button.dataset.mode, modePinned: true }));
   });
 
   for (const name of ["highlightColor", "highlightShortcut", "penColor", "penWidth"]) {
@@ -77,17 +71,78 @@ async function init() {
   saveSync.addEventListener("click", saveSyncConfig);
 }
 
-function updateContentState(tabId, patch) {
-  currentState = { ...currentState, ...patch };
-  chrome.tabs.sendMessage(tabId, { type: "WHL_SET_MODE", state: currentState }, (response) => {
-    if (!response?.ok) {
-      setStatus("工具状态更新失败");
+async function getContentStatus(tabId) {
+  popupDebugLog("get status", { tabId });
+  const response = await sendTabMessage(tabId, { type: "WHL_GET_STATUS" });
+  popupDebugLog("get status response", { tabId, ok: Boolean(response?.ok), state: response?.state });
+  if (!response?.ok) {
+    popupDebugLog("content missing, injecting", { tabId });
+    const injected = await injectContentScript(tabId);
+    popupDebugLog("inject result", { tabId, injected });
+    if (!injected) {
+      setStatus("当前页面暂不支持标注，请刷新后重试");
       return;
     }
-    currentState = response.state;
-    syncStateToForm(response.state);
-    setStatus("工具已切换");
+    const retry = await sendTabMessage(tabId, { type: "WHL_GET_STATUS" });
+    if (!retry?.ok) {
+      setStatus("当前页面暂不支持标注，请刷新后重试");
+      return;
+    }
+    currentState = retry.state;
+    syncStateToForm(retry.state);
+    renderCounts(retry.counts);
+    setStatus(statusText(retry.state, "标注工具已就绪"));
+    return;
+  }
+  currentState = response.state;
+  syncStateToForm(response.state);
+  renderCounts(response.counts);
+  setStatus(statusText(response.state, "标注工具已就绪"));
+}
+
+async function updateContentState(tabId, patch) {
+  currentState = { ...currentState, ...patch };
+  popupDebugLog("set mode/state", { tabId, patch, currentState });
+  let response = await sendTabMessage(tabId, { type: "WHL_SET_MODE", state: currentState });
+  if (!response?.ok && await injectContentScript(tabId)) {
+    response = await sendTabMessage(tabId, { type: "WHL_SET_MODE", state: currentState });
+  }
+  if (!response?.ok) {
+    setStatus("工具状态更新失败，请刷新页面后重试");
+    return;
+  }
+  currentState = response.state;
+  syncStateToForm(response.state);
+  setStatus(statusText(response.state, "工具已切换"));
+}
+
+function sendTabMessage(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      resolve(chrome.runtime.lastError ? null : response);
+    });
   });
+}
+
+async function injectContentScript(tabId) {
+  try {
+    await chrome.scripting.insertCSS({ target: { tabId }, files: ["src/content/content.css"] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["src/content/content.js"] });
+    return true;
+  } catch (error) {
+    popupDebugLog("inject failed", { tabId, message: error?.message });
+    return false;
+  }
+}
+
+async function popupDebugLog(message, data = {}) {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const host = tab?.url ? new URL(tab.url).hostname : "";
+    if (!POPUP_DEBUG_HOSTS.includes(host)) return;
+    console.info(`[WHL POPUP][${new Date().toISOString()}] ${message}`, data);
+  } catch (_error) {
+  }
 }
 
 function saveSyncConfig() {
@@ -125,6 +180,15 @@ function isHexColor(value) {
 
 function renderCounts(value = {}) {
   counts.textContent = `当前网页：${value.highlights || 0} 个高亮，${value.underlines || 0} 条划线，${value.strokes || 0} 条笔迹`;
+}
+
+function statusText(state, prefix) {
+  if (state?.mode === "browse") return `${prefix}：浏览模式下选中文字不会弹菜单`;
+  if (state?.mode === "highlight") return `${prefix}：高亮模式，选中文字会弹颜色菜单`;
+  if (state?.mode === "underline") return `${prefix}：划线模式，选中文字会弹颜色菜单`;
+  if (state?.mode === "pen") return `${prefix}：画笔模式，可拖动绘制`;
+  if (state?.mode === "eraser") return `${prefix}：删除模式，可点击标注删除`;
+  return prefix;
 }
 
 function setStatus(message) {
