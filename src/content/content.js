@@ -511,11 +511,13 @@ function positionFloatingMenu(menu, anchorRect) {
 function hideSelectionMenu() {
   pendingSelection = null;
   selectionMenu.hidden = true;
+  selectionMenu.style.setProperty("display", "none", "important");
 }
 
 function dismissSelectionMenu() {
   suppressSelectionMenuUntil = Date.now() + 350;
   hideSelectionMenu();
+  clearSelection();
 }
 
 function hideSelectionMenuIfSafe() {
