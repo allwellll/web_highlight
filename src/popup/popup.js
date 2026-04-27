@@ -14,6 +14,7 @@ const inputs = {
 };
 const counts = document.querySelector("#counts");
 const status = document.querySelector("#status");
+const syncStatus = document.querySelector("#syncStatus");
 const clearPage = document.querySelector("#clearPage");
 const cleanupLocal = document.querySelector("#cleanupLocal");
 const saveSync = document.querySelector("#saveSync");
@@ -21,6 +22,12 @@ const saveSync = document.querySelector("#saveSync");
 let currentState = {};
 
 init();
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "WHL_SYNC_STATUS_UPDATED") return false;
+  renderSyncStatus();
+  return false;
+});
 
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -37,6 +44,7 @@ async function init() {
     inputs.password.value = config?.password || "";
     inputs.enabled.checked = Boolean(config?.enabled);
   });
+  renderSyncStatus(tab.url);
 
   modeButtons.forEach((button) => {
     button.addEventListener("click", () => updateContentState(tab.id, { mode: button.dataset.mode, modePinned: true }));
@@ -154,7 +162,20 @@ function saveSyncConfig() {
   };
   chrome.runtime.sendMessage({ type: "WHL_SET_SYNC_CONFIG", config }, (response) => {
     setStatus(response?.ok ? "同步设置已保存" : "同步设置保存失败");
+    renderSyncStatus();
   });
+}
+
+async function renderSyncStatus(url) {
+  const pageUrl = url || (await activeTabUrl());
+  chrome.runtime.sendMessage({ type: "WHL_GET_SYNC_STATUS", url: pageUrl }, (sync) => {
+    syncStatus.textContent = formatSyncStatus(sync);
+  });
+}
+
+async function activeTabUrl() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.url || "";
 }
 
 function syncStateToForm(state) {
@@ -180,6 +201,21 @@ function isHexColor(value) {
 
 function renderCounts(value = {}) {
   counts.textContent = `当前网页：${value.highlights || 0} 个高亮，${value.underlines || 0} 条划线，${value.strokes || 0} 条笔迹`;
+}
+
+function formatSyncStatus(sync) {
+  if (!sync) return "同步状态：暂无当前网页同步记录";
+  const operation = sync.operation === "load" ? "拉取" : "上传";
+  const statusTextMap = {
+    queued: "排队中",
+    success: "成功",
+    error: "失败",
+    skipped: "已跳过"
+  };
+  const time = sync.timestamp ? new Date(sync.timestamp).toLocaleString() : "未知时间";
+  const counts = sync.counts || {};
+  const reason = sync.reason && !["saved", "loaded", "queued"].includes(sync.reason) ? `，原因：${sync.reason}` : "";
+  return `同步状态：${operation}${statusTextMap[sync.status] || sync.status || "未知"}，时间：${time}，记录：${counts.total || 0} 条（高亮 ${counts.highlights || 0}，划线 ${counts.underlines || 0}，笔迹 ${counts.strokes || 0}）${reason}`;
 }
 
 function statusText(state, prefix) {
