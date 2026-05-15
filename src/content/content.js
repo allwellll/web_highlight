@@ -327,9 +327,10 @@ function getCurrentSelectionData(source = "unknown") {
     return null;
   }
 
-  const selectedText = selection.toString();
   const visualAnchor = createVisualAnchor(range);
-  const offsets = rangeToOffsets(range);
+  const normalizedRange = normalizeKatexRange(range);
+  const selectedText = normalizedRange.toString();
+  const offsets = rangeToOffsets(normalizedRange);
   if ((!offsets || offsets.start === offsets.end) && !visualAnchor) {
     debugLog("selection skipped: no usable anchor", {
       source,
@@ -349,7 +350,7 @@ function getCurrentSelectionData(source = "unknown") {
     start: offsets?.start,
     end: offsets?.end,
     text: selectedText,
-    anchor: offsets ? createTextAnchor(range, offsets, selectedText) : null,
+    anchor: offsets ? createTextAnchor(normalizedRange, offsets, selectedText) : null,
     visualAnchor,
     rect: selectionRect(range)
   };
@@ -679,14 +680,22 @@ function renderTextAnnotations() {
     const range = annotationToRange(highlight, textIndex);
     const rectResult = annotationRects(highlight, range);
     if (!rectResult.rects.length) continue;
-    const usesNativeHighlight = range && useNativeHighlights && !rectResult.usedVisualAnchor;
-    if (usesNativeHighlight) {
-      renderNativeTextAnnotation(highlight, range, nativeRules);
+    let nativeRange = null;
+    if (useNativeHighlights) {
+      if (range) {
+        nativeRange = range;
+      } else if (rectResult.usedVisualAnchor) {
+        nativeRange = buildKatexNativeRange(highlight.visualAnchor);
+      }
+    }
+    if (nativeRange) {
+      renderNativeTextAnnotation(highlight, nativeRange, nativeRules);
     }
     for (const rect of rectResult.rects) {
       const node = document.createElement("div");
       const typeClass = annotationType(highlight) === "underline" ? "whl-underline" : "whl-highlight";
-      node.className = `whl-text-mark ${typeClass}${usesNativeHighlight ? " whl-native-hitbox" : ""}${rectResult.usedVisualAnchor ? " whl-visual-anchor" : ""}`;
+      const isVisualFallback = rectResult.usedVisualAnchor && !nativeRange;
+      node.className = `whl-text-mark ${typeClass}${nativeRange ? " whl-native-hitbox" : ""}${isVisualFallback ? " whl-visual-anchor" : ""}`;
       node.dataset.whlId = highlight.id;
       node.title = "点击打开操作菜单";
       node.style.setProperty("--whl-color", highlight.color || DEFAULT_STATE.highlightColor);
@@ -741,6 +750,50 @@ function visualAnchorRoot(visualAnchor) {
     || roots.find((root) => root.textContent?.includes(visualAnchor.selectedText || ""));
 }
 
+function buildKatexNativeRange(visualAnchor) {
+  if (visualAnchor?.type !== "katex") return null;
+  const root = visualAnchorRoot(visualAnchor);
+  if (!root) return null;
+  const katexHtml = root.querySelector(".katex-html");
+  if (!katexHtml) return null;
+  const selectedText = visualAnchor.selectedText || "";
+  const fullText = katexHtml.textContent || "";
+  if (!selectedText || selectedText === fullText) {
+    const range = document.createRange();
+    range.selectNodeContents(katexHtml);
+    return range;
+  }
+  const startIdx = fullText.indexOf(selectedText);
+  if (startIdx === -1) {
+    const range = document.createRange();
+    range.selectNodeContents(katexHtml);
+    return range;
+  }
+  const endIdx = startIdx + selectedText.length;
+  const walker = document.createTreeWalker(katexHtml, NodeFilter.SHOW_TEXT);
+  let pos = 0;
+  let startNode = null, startOffset = 0, endNode = null, endOffset = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const len = node.nodeValue.length;
+    if (!startNode && pos + len > startIdx) {
+      startNode = node;
+      startOffset = startIdx - pos;
+    }
+    if (pos + len >= endIdx) {
+      endNode = node;
+      endOffset = endIdx - pos;
+      break;
+    }
+    pos += len;
+  }
+  if (!startNode || !endNode) return null;
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  return range;
+}
+
 function supportsNativeHighlights() {
   return Boolean(globalThis.CSS?.highlights && globalThis.Highlight);
 }
@@ -786,6 +839,33 @@ function createPath(stroke) {
   path.setAttribute("stroke", stroke.color || DEFAULT_STATE.penColor);
   path.setAttribute("stroke-width", stroke.width || DEFAULT_STATE.penWidth);
   return path;
+}
+
+function normalizeKatexEndpoint(container, offset, isStart) {
+  const element = container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement;
+  const mathml = element?.closest?.(".katex-mathml");
+  if (!mathml) return null;
+  const katex = mathml.closest(".katex");
+  const katexHtml = katex?.querySelector(".katex-html");
+  if (!katexHtml) return null;
+  const walker = document.createTreeWalker(katexHtml, NodeFilter.SHOW_TEXT);
+  if (isStart) {
+    const first = walker.firstChild();
+    return first ? { node: first, offset: 0 } : null;
+  }
+  let last = null;
+  while (walker.nextNode()) last = walker.currentNode;
+  return last ? { node: last, offset: last.nodeValue.length } : null;
+}
+
+function normalizeKatexRange(range) {
+  const start = normalizeKatexEndpoint(range.startContainer, range.startOffset, true);
+  const end = normalizeKatexEndpoint(range.endContainer, range.endOffset, false);
+  if (!start && !end) return range;
+  const normalized = document.createRange();
+  normalized.setStart(start?.node || range.startContainer, start?.offset ?? range.startOffset);
+  normalized.setEnd(end?.node || range.endContainer, end?.offset ?? range.endOffset);
+  return normalized;
 }
 
 function rangeToOffsets(range) {
