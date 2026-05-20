@@ -499,6 +499,9 @@ function handleDocumentClick(event) {
   const target = event.target.closest?.("[data-whl-id]");
   if (target) return;
 
+  const interactive = event.target?.closest?.("button, a, input, select, textarea, [role='button'], [role='link']");
+  if (interactive && !isWhlNode(interactive)) return;
+
   const point = { x: event.pageX, y: event.pageY };
   const textHit = findTextAnnotationAtPoint(point);
   if (textHit) {
@@ -656,7 +659,6 @@ function hideSelectionMenu() {
 function dismissSelectionMenu() {
   suppressSelectionMenuUntil = Date.now() + 350;
   hideSelectionMenu();
-  clearSelection();
 }
 
 function hideSelectionMenuIfSafe() {
