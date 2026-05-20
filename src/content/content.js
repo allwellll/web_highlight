@@ -232,6 +232,46 @@ function createLayers() {
   minimapStyle = document.createElement("style");
   minimapStyle.dataset.whlMinimap = "true";
   minimapStyle.textContent = `
+    @keyframes whl-menu-in {
+      from { opacity: 0; transform: translateY(6px) scale(0.95); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .whl-selection-menu {
+      animation: whl-menu-in 0.18s ease-out !important;
+    }
+    .whl-color-button:hover {
+      transform: scale(1.18) !important;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+    }
+    .whl-color-button:active {
+      transform: scale(0.92) !important;
+    }
+    .whl-annotation-menu {
+      background: rgba(30, 50, 80, 0.62) !important;
+      backdrop-filter: blur(16px) saturate(1.6) !important;
+      -webkit-backdrop-filter: blur(16px) saturate(1.6) !important;
+      border: 1px solid rgba(255, 255, 255, 0.2) !important;
+      border-radius: 8px !important;
+      box-shadow: 0 4px 20px rgba(20, 40, 80, 0.25), 0 1px 4px rgba(0, 0, 0, 0.12) !important;
+      padding: 4px !important;
+      animation: whl-menu-in 0.15s ease-out !important;
+    }
+    .whl-annotation-menu button {
+      background: transparent !important;
+      border: 0 !important;
+      border-radius: 6px !important;
+      color: rgba(255, 255, 255, 0.9) !important;
+      cursor: pointer !important;
+      font-size: 13px !important;
+      padding: 6px 14px !important;
+      transition: background 0.12s ease !important;
+    }
+    .whl-annotation-menu button:hover {
+      background: rgba(255, 255, 255, 0.15) !important;
+    }
+    .whl-annotation-menu button:active {
+      background: rgba(255, 255, 255, 0.25) !important;
+    }
     .whl-minimap {
       position: fixed !important; top: 0 !important; right: 0 !important;
       width: 12px !important; height: 100vh !important; z-index: 2147483646 !important;
@@ -581,20 +621,22 @@ function renderSelectionMenu(rect, type) {
 function applySelectionMenuCriticalStyle() {
   setImportantStyles(selectionMenu, {
     alignItems: "center",
-    background: "rgba(32, 33, 36, 0.96)",
-    border: "0",
+    background: "rgba(30, 50, 80, 0.62)",
+    backdropFilter: "blur(16px) saturate(1.6)",
+    webkitBackdropFilter: "blur(16px) saturate(1.6)",
+    border: "1px solid rgba(255, 255, 255, 0.2)",
     borderRadius: "999px",
-    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.24)",
+    boxShadow: "0 4px 20px rgba(20, 40, 80, 0.25), 0 1px 4px rgba(0, 0, 0, 0.12)",
     boxSizing: "border-box",
     display: "flex",
     flexDirection: "row",
     gap: "8px",
-    height: "40px",
-    minHeight: "40px",
-    minWidth: "176px",
+    height: "42px",
+    minHeight: "42px",
+    minWidth: "190px",
     opacity: "1",
     overflow: "visible",
-    padding: "8px 10px",
+    padding: "8px 11px",
     pointerEvents: "auto",
     position: "fixed",
     transform: "none",
@@ -608,19 +650,21 @@ function applyColorButtonCriticalStyle(element, color) {
   setImportantStyles(element, {
     appearance: "auto",
     background: color || "transparent",
-    border: "2px solid rgba(255, 255, 255, 0.82)",
+    border: "2px solid rgba(255, 255, 255, 0.7)",
     borderRadius: "50%",
+    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.12)",
     boxSizing: "border-box",
     cursor: "pointer",
     display: "inline-block",
     flex: "0 0 auto",
-    height: "24px",
-    minHeight: "24px",
-    minWidth: "24px",
+    height: "26px",
+    minHeight: "26px",
+    minWidth: "26px",
     opacity: "1",
     padding: "0",
+    transition: "transform 0.15s ease, box-shadow 0.15s ease",
     visibility: "visible",
-    width: "24px"
+    width: "26px"
   });
 }
 
