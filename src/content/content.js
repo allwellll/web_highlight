@@ -34,6 +34,10 @@ let selectionMenu;
 let annotationMenu;
 let nativeHighlightStyle;
 let nativeHighlightNames = [];
+let minimapEl = null;
+let minimapViewport = null;
+let minimapStyle = null;
+let minimapDots = [];
 let pendingSelection = null;
 let currentStroke = null;
 let currentPath = null;
@@ -45,6 +49,9 @@ let isScrolling = false;
 let mutationObserver = null;
 let resizeObserver = null;
 let suppressSelectionMenuUntil = 0;
+let textIndexCache = null;
+let textIndexDirty = true;
+let renderAllPending = false;
 
 init();
 
@@ -69,7 +76,7 @@ function bindEvents() {
   document.addEventListener("keydown", handleKeydown, true);
   document.addEventListener("visibilitychange", ensureOverlayNodesConnected);
   window.addEventListener("focus", ensureOverlayNodesConnected);
-  window.addEventListener("resize", () => scheduleDynamicRender("window resize"));
+  window.addEventListener("resize", () => { scheduleDynamicRender("window resize"); updateMinimapViewport(); });
   document.addEventListener("load", handleResourceLoad, true);
   document.addEventListener("scroll", handleDocumentScroll, true);
 
@@ -132,6 +139,7 @@ function bindDynamicRenderEvents() {
 
 function handleDocumentMutations(records) {
   if (!records.some(isExternalMutation)) return;
+  invalidateTextIndex();
   scheduleDynamicRender("dom mutation");
 }
 
@@ -144,11 +152,12 @@ function scheduleDynamicRender(reason) {
   clearTimeout(dynamicRenderTimer);
   dynamicRenderTimer = setTimeout(() => {
     debugLog("dynamic render", { reason });
-    renderAll();
+    scheduleRenderAll();
   }, DYNAMIC_RENDER_DELAY);
 }
 
 function handleDocumentScroll() {
+  updateMinimapViewport();
   if (!pageData.highlights.length && !pageData.strokes.length) return;
   isScrolling = true;
   hideScrollableOverlayDuringScroll();
@@ -156,7 +165,7 @@ function handleDocumentScroll() {
   scrollRenderTimer = setTimeout(() => {
     isScrolling = false;
     debugLog("scroll render");
-    renderAll();
+    scheduleRenderAll();
     showScrollableOverlayAfterScroll();
   }, SCROLL_RENDER_DELAY);
 }
@@ -184,13 +193,13 @@ function isExternalMutation(record) {
 
 function isWhlNode(node) {
   if (!node) return false;
-  if (node === highlightLayer || node === penLayer || node === selectionMenu || node === annotationMenu || node === nativeHighlightStyle) return true;
+  if (node === highlightLayer || node === penLayer || node === selectionMenu || node === annotationMenu || node === nativeHighlightStyle || node === minimapEl || node === minimapStyle) return true;
   const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-  return Boolean(element?.closest?.(".whl-layer, .whl-pen-layer, .whl-selection-menu, .whl-annotation-menu, [data-whl-native-highlights]"));
+  return Boolean(element?.closest?.(".whl-layer, .whl-pen-layer, .whl-selection-menu, .whl-annotation-menu, .whl-minimap, [data-whl-native-highlights]"));
 }
 
 function isOverlayRootNode(node) {
-  return node === highlightLayer || node === penLayer || node === selectionMenu || node === annotationMenu || node === nativeHighlightStyle;
+  return node === highlightLayer || node === penLayer || node === selectionMenu || node === annotationMenu || node === nativeHighlightStyle || node === minimapEl || node === minimapStyle;
 }
 
 function createLayers() {
@@ -212,13 +221,50 @@ function createLayers() {
 
   nativeHighlightStyle = document.createElement("style");
   nativeHighlightStyle.dataset.whlNativeHighlights = "true";
+
+  minimapEl = document.createElement("div");
+  minimapEl.className = "whl-minimap";
+  minimapViewport = document.createElement("div");
+  minimapViewport.className = "whl-minimap-viewport";
+  minimapEl.appendChild(minimapViewport);
+  minimapEl.addEventListener("click", handleMinimapClick);
+
+  minimapStyle = document.createElement("style");
+  minimapStyle.dataset.whlMinimap = "true";
+  minimapStyle.textContent = `
+    .whl-minimap {
+      position: fixed !important; top: 0 !important; right: 0 !important;
+      width: 12px !important; height: 100vh !important; z-index: 2147483646 !important;
+      background: rgba(0,0,0,0.06) !important; cursor: pointer !important;
+      pointer-events: auto !important; opacity: 0 !important;
+      transition: opacity 0.2s !important; box-sizing: border-box !important;
+      display: none !important; padding: 0 !important; margin: 0 !important;
+      border: 0 !important; overflow: hidden !important;
+    }
+    .whl-minimap:hover { opacity: 1 !important; width: 14px !important; }
+    .whl-minimap.whl-minimap-visible { display: block !important; opacity: 0.65 !important; }
+    .whl-minimap-viewport {
+      position: absolute !important; left: 0 !important; right: 0 !important;
+      background: rgba(0,0,0,0.10) !important; border-radius: 2px !important;
+      pointer-events: none !important; min-height: 8px !important;
+      transition: top 0.1s !important; box-sizing: border-box !important;
+    }
+    .whl-minimap-dot {
+      position: absolute !important; left: 2px !important;
+      width: 8px !important; height: 8px !important; border-radius: 50% !important;
+      pointer-events: none !important; box-sizing: border-box !important;
+      opacity: 0.85 !important; transition: none !important;
+    }
+    .whl-minimap:hover .whl-minimap-dot { width: 10px !important; height: 10px !important; left: 2px !important; }
+  `;
+
   ensureOverlayNodesConnected();
   resizeLayers();
 }
 
 function ensureOverlayNodesConnected() {
   const root = document.body || document.documentElement;
-  const nodes = [highlightLayer, penLayer, selectionMenu, annotationMenu, nativeHighlightStyle].filter(Boolean);
+  const nodes = [highlightLayer, penLayer, selectionMenu, annotationMenu, nativeHighlightStyle, minimapEl, minimapStyle].filter(Boolean);
   for (const node of nodes) {
     if (node.isConnected && node.ownerDocument === document) continue;
     root.appendChild(node);
@@ -350,7 +396,7 @@ function getCurrentSelectionData(source = "unknown") {
     start: offsets?.start,
     end: offsets?.end,
     text: selectedText,
-    anchor: offsets ? createTextAnchor(normalizedRange, offsets, selectedText) : null,
+    _range: normalizedRange.cloneRange(),
     visualAnchor,
     rect: selectionRect(range)
   };
@@ -358,6 +404,9 @@ function getCurrentSelectionData(source = "unknown") {
 
 function addTextAnnotation(selectionData, color, type = state.mode) {
   if (!selectionData || !isHexColor(color)) return;
+  const anchor = (selectionData._range && Number.isInteger(selectionData.start))
+    ? createTextAnchor(selectionData._range, { start: selectionData.start, end: selectionData.end }, selectionData.text)
+    : null;
   pageData.highlights.push({
     id: createId(),
     type: type === "underline" ? "underline" : "highlight",
@@ -365,7 +414,7 @@ function addTextAnnotation(selectionData, color, type = state.mode) {
     text: selectionData.text,
     start: selectionData.start,
     end: selectionData.end,
-    anchor: selectionData.anchor,
+    anchor,
     visualAnchor: selectionData.visualAnchor,
     createdAt: Date.now()
   });
@@ -666,7 +715,73 @@ function renderAll() {
   resizeLayers();
   renderTextAnnotations();
   renderStrokes();
+  renderMinimap();
   showScrollableOverlayAfterScroll();
+}
+
+function renderMinimap() {
+  if (!minimapEl) return;
+  const marks = highlightLayer.querySelectorAll(".whl-text-mark[data-whl-id]");
+  const seen = new Set();
+  const dots = [];
+  for (const mark of marks) {
+    const id = mark.dataset.whlId;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const color = mark.style.getPropertyValue("--whl-color") || "#ffe600";
+    const top = parseFloat(mark.style.top);
+    if (!Number.isFinite(top)) continue;
+    dots.push({ id, top, color });
+  }
+
+  minimapDots = dots;
+  const hasContent = dots.length > 0;
+  minimapEl.classList.toggle("whl-minimap-visible", hasContent);
+  if (!hasContent) return;
+
+  const oldDotEls = minimapEl.querySelectorAll(".whl-minimap-dot");
+  for (const el of oldDotEls) el.remove();
+
+  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1);
+  const fragment = document.createDocumentFragment();
+  for (const dot of dots) {
+    const el = document.createElement("div");
+    el.className = "whl-minimap-dot";
+    el.style.cssText = `top: ${(dot.top / pageHeight) * 100}% !important; background: ${dot.color} !important;`;
+    el.dataset.whlDotId = dot.id;
+    fragment.appendChild(el);
+  }
+  minimapEl.appendChild(fragment);
+  updateMinimapViewport();
+}
+
+function updateMinimapViewport() {
+  if (!minimapViewport || !minimapEl.classList.contains("whl-minimap-visible")) return;
+  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1);
+  const viewportRatio = window.innerHeight / pageHeight;
+  const scrollRatio = window.scrollY / pageHeight;
+  minimapViewport.style.top = `${scrollRatio * 100}%`;
+  minimapViewport.style.height = `${viewportRatio * 100}%`;
+}
+
+function handleMinimapClick(event) {
+  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1);
+  const rect = minimapEl.getBoundingClientRect();
+  const clickRatio = (event.clientY - rect.top) / rect.height;
+  const targetY = clickRatio * pageHeight;
+
+  let nearest = null;
+  let bestDist = Infinity;
+  for (const dot of minimapDots) {
+    const dist = Math.abs(dot.top - targetY);
+    if (dist < bestDist) { bestDist = dist; nearest = dot; }
+  }
+
+  if (nearest && bestDist < window.innerHeight) {
+    window.scrollTo({ top: nearest.top - window.innerHeight / 3, behavior: "smooth" });
+  } else {
+    window.scrollTo({ top: targetY - window.innerHeight / 2, behavior: "smooth" });
+  }
 }
 
 function renderTextAnnotations() {
@@ -675,7 +790,7 @@ function renderTextAnnotations() {
   const fragment = document.createDocumentFragment();
   const nativeRules = [];
   const useNativeHighlights = supportsNativeHighlights();
-  const textIndex = createTextIndex();
+  const textIndex = getTextIndex();
   for (const highlight of pageData.highlights) {
     const range = annotationToRange(highlight, textIndex);
     const rectResult = annotationRects(highlight, range);
@@ -869,7 +984,7 @@ function normalizeKatexRange(range) {
 }
 
 function rangeToOffsets(range) {
-  const textIndex = createTextIndex();
+  const textIndex = getTextIndex();
   let start = null;
   let end = null;
   for (let index = 0; index < textIndex.nodes.length; index += 1) {
@@ -882,7 +997,7 @@ function rangeToOffsets(range) {
 }
 
 function createTextAnchor(range, offsets, text) {
-  const fullText = documentTextFromIndex(createTextIndex());
+  const fullText = documentTextFromIndex(getTextIndex());
   return {
     version: 1,
     prefix: fullText.slice(Math.max(0, offsets.start - ANCHOR_CONTEXT_CHARS), offsets.start),
@@ -932,7 +1047,7 @@ function rangeFromTextQuote(annotation, textIndex) {
   return buildRange(best.start, best.start + annotation.text.length, textIndex);
 }
 
-function buildRange(start, end, textIndex = createTextIndex()) {
+function buildRange(start, end, textIndex = getTextIndex()) {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start > end) return null;
   const startPoint = pointAtOffset(start, textIndex);
   const endPoint = pointAtOffset(end, textIndex);
@@ -972,6 +1087,27 @@ function createTextIndex() {
     position += value.length;
   }
   return { nodes, starts, fullText: parts.join("") };
+}
+
+function getTextIndex() {
+  if (!textIndexDirty && textIndexCache) return textIndexCache;
+  textIndexCache = createTextIndex();
+  textIndexDirty = false;
+  return textIndexCache;
+}
+
+function invalidateTextIndex() {
+  textIndexDirty = true;
+  textIndexCache = null;
+}
+
+function scheduleRenderAll() {
+  if (renderAllPending) return;
+  renderAllPending = true;
+  requestAnimationFrame(() => {
+    renderAllPending = false;
+    renderAll();
+  });
 }
 
 function documentTextFromIndex(textIndex) {
@@ -1090,7 +1226,8 @@ function isIgnoredTextNode(node) {
   const parent = node.parentElement;
   if (!parent) return true;
   if (highlightLayer.contains(parent) || penLayer.contains(parent)) return true;
-  return Boolean(parent.closest("script, style, noscript, template, .katex-mathml, .whl-selection-menu, .whl-annotation-menu"));
+  if (minimapEl?.contains(parent)) return true;
+  return Boolean(parent.closest("script, style, noscript, template, .katex-mathml, .whl-selection-menu, .whl-annotation-menu, .whl-minimap"));
 }
 
 function applyModeClass() {
