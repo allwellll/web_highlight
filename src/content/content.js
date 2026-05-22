@@ -18,7 +18,7 @@ const DEBUG_ENABLED = DEBUG_HOSTS.includes(location.hostname);
 const DEFAULT_STATE = {
   mode: "highlight",
   highlightColor: "#f0d86a",
-  highlightPalette: ["#f0d86a", "#8dc49b", "#e4a882", "#a894e8", "#7ea6d8", "#d4909a"],
+  highlightPalette: ["#f0d86a", "#8dc49b", "#e4a882", "#8db4e2", "#d4909a", "#a894e8"],
   highlightShortcut: "Alt+H",
   penColor: "#e53935",
   penWidth: 4,
