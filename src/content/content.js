@@ -17,8 +17,8 @@ const DEBUG_HOSTS = ["ns01.plusai.io"];
 const DEBUG_ENABLED = DEBUG_HOSTS.includes(location.hostname);
 const DEFAULT_STATE = {
   mode: "highlight",
-  highlightColor: "#ffe600",
-  highlightPalette: ["#ffe600", "#7cff7c", "#74c0fc", "#ffadad"],
+  highlightColor: "#f5e79e",
+  highlightPalette: ["#f5e79e", "#c1d7c3", "#ecccb8", "#c4bef1", "#b3c2e4", "#deb7bd"],
   highlightShortcut: "Alt+H",
   penColor: "#e53935",
   penWidth: 4,
@@ -774,7 +774,7 @@ function renderMinimap() {
     const id = mark.dataset.whlId;
     if (seen.has(id)) continue;
     seen.add(id);
-    const color = mark.style.getPropertyValue("--whl-color") || "#ffe600";
+    const color = mark.style.getPropertyValue("--whl-color") || "#f5e79e";
     const top = parseFloat(mark.style.top);
     if (!Number.isFinite(top)) continue;
     dots.push({ id, top, color });
