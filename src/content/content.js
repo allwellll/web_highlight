@@ -17,8 +17,8 @@ const DEBUG_HOSTS = ["ns01.plusai.io"];
 const DEBUG_ENABLED = DEBUG_HOSTS.includes(location.hostname);
 const DEFAULT_STATE = {
   mode: "highlight",
-  highlightColor: "#f5e79e",
-  highlightPalette: ["#f5e79e", "#c1d7c3", "#ecccb8", "#c4bef1", "#b3c2e4", "#deb7bd"],
+  highlightColor: "#f0d86a",
+  highlightPalette: ["#f0d86a", "#8dc49b", "#e4a882", "#a894e8", "#7ea6d8", "#d4909a"],
   highlightShortcut: "Alt+H",
   penColor: "#e53935",
   penWidth: 4,
@@ -245,6 +245,23 @@ function createLayers() {
     }
     .whl-color-button:active {
       transform: scale(0.92) !important;
+    }
+    .whl-color-expand-btn:hover {
+      background: rgba(255, 255, 255, 0.22) !important;
+      transform: scale(1.12) !important;
+    }
+    .whl-color-expand-btn:active {
+      transform: scale(0.92) !important;
+    }
+    .whl-color-expand-btn svg {
+      transition: transform 0.2s ease !important;
+    }
+    .whl-color-collapsed {
+      animation: whl-color-expand 0.18s ease-out !important;
+    }
+    @keyframes whl-color-expand {
+      from { opacity: 0; transform: scale(0.7); }
+      to   { opacity: 1; transform: scale(1); }
     }
     .whl-annotation-menu {
       background: rgba(30, 50, 80, 0.62) !important;
@@ -576,13 +593,23 @@ function renderSelectionMenu(rect, type) {
   ensureOverlayNodesConnected();
   selectionMenu.textContent = "";
   const colors = normalizedPalette();
-  for (const color of colors) {
+  const VISIBLE_COUNT = 4;
+  const needsCollapse = colors.length > VISIBLE_COUNT;
+
+  for (let i = 0; i < colors.length; i++) {
+    const color = colors[i];
     const button = document.createElement("button");
     button.type = "button";
     button.className = "whl-color-button";
+    if (needsCollapse && i >= VISIBLE_COUNT) {
+      button.classList.add("whl-color-collapsed");
+    }
     button.style.backgroundColor = color;
     button.title = `${type === "underline" ? "划线" : "高亮"}为 ${color}`;
     applyColorButtonCriticalStyle(button, color);
+    if (needsCollapse && i >= VISIBLE_COUNT) {
+      setImportantStyles(button, { display: "none" });
+    }
     button.addEventListener("mousedown", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -595,13 +622,50 @@ function renderSelectionMenu(rect, type) {
   customColor.type = "color";
   customColor.value = state.highlightColor;
   customColor.title = `自定义${type === "underline" ? "划线" : "高亮"}颜色`;
+  customColor.className = "whl-color-collapsed";
   applyColorButtonCriticalStyle(customColor);
+  if (needsCollapse) {
+    setImportantStyles(customColor, { display: "none" });
+  }
   customColor.addEventListener("input", () => {
     state = { ...state, highlightColor: customColor.value };
     persistState();
   });
   customColor.addEventListener("change", () => addTextAnnotation(pendingSelection, customColor.value, type));
   selectionMenu.appendChild(customColor);
+
+  if (needsCollapse) {
+    const expandBtn = document.createElement("button");
+    expandBtn.type = "button";
+    expandBtn.className = "whl-color-expand-btn";
+    expandBtn.title = "更多颜色";
+    expandBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.85)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`;
+    applyColorButtonCriticalStyle(expandBtn);
+    setImportantStyles(expandBtn, {
+      background: "rgba(255, 255, 255, 0.12)",
+      border: "1.5px solid rgba(255, 255, 255, 0.3)",
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      transition: "transform 0.2s ease, background 0.15s ease, box-shadow 0.15s ease"
+    });
+
+    let expanded = false;
+    const setExpanded = (show) => {
+      expanded = show;
+      const items = selectionMenu.querySelectorAll(".whl-color-collapsed");
+      for (const item of items) {
+        setImportantStyles(item, { display: show ? "inline-block" : "none" });
+      }
+      const svg = expandBtn.querySelector("svg");
+      if (svg) svg.style.transform = show ? "rotate(180deg)" : "rotate(0deg)";
+    };
+
+    expandBtn.addEventListener("mouseenter", () => setExpanded(true));
+    selectionMenu.addEventListener("mouseleave", () => setExpanded(false));
+
+    selectionMenu.appendChild(expandBtn);
+  }
 
   selectionMenu.hidden = false;
   applySelectionMenuCriticalStyle();
