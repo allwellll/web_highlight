@@ -19,6 +19,7 @@ const DEFAULT_STATE = {
   mode: "highlight",
   highlightColor: "#f0d86a",
   highlightPalette: ["#f0d86a", "#8dc49b", "#e4a882", "#87CEFA", "#d4909a", "#a894e8"],
+  recentColors: [],
   highlightShortcut: "Alt+H",
   penColor: "#e53935",
   penWidth: 4,
@@ -475,6 +476,7 @@ function addTextAnnotation(selectionData, color, type = state.mode) {
     visualAnchor: selectionData.visualAnchor,
     createdAt: Date.now()
   });
+  recordRecentColor(color);
   clearSelection();
   hideSelectionMenu();
   renderTextAnnotations();
@@ -1431,9 +1433,19 @@ function selectionRect(range) {
   return { left, top, right, bottom, width: right - left, height: bottom - top };
 }
 
+function recordRecentColor(color) {
+  if (!isHexColor(color)) return;
+  const recent = (state.recentColors || []).filter(c => c !== color);
+  recent.unshift(color);
+  state = { ...state, recentColors: recent.slice(0, 8) };
+  persistState();
+}
+
 function normalizedPalette() {
-  const colors = Array.isArray(state.highlightPalette) ? state.highlightPalette : [];
-  return [...new Set([state.highlightColor, ...colors].filter(isHexColor))].slice(0, 8);
+  const palette = Array.isArray(state.highlightPalette) ? state.highlightPalette : [];
+  const recent = Array.isArray(state.recentColors) ? state.recentColors : [];
+  const all = [...new Set([state.highlightColor, ...recent, ...palette].filter(isHexColor))];
+  return all.slice(0, 8);
 }
 
 function isHexColor(value) {
