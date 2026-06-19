@@ -460,7 +460,7 @@ function getCurrentSelectionData(source = "unknown") {
   };
 }
 
-function addTextAnnotation(selectionData, color, type = state.mode) {
+function addTextAnnotation(selectionData, color, type = state.mode, options = {}) {
   if (!selectionData || !isHexColor(color)) return;
   const anchor = (selectionData._range && Number.isInteger(selectionData.start))
     ? createTextAnchor(selectionData._range, { start: selectionData.start, end: selectionData.end }, selectionData.text)
@@ -477,18 +477,22 @@ function addTextAnnotation(selectionData, color, type = state.mode) {
     createdAt: Date.now()
   });
   recordRecentColor(color);
-  clearSelection();
+  if (!options.preserveSelection) clearSelection();
   hideSelectionMenu();
   renderTextAnnotations();
   queueSave();
 }
 
 function handleKeydown(event) {
+  if (handleVimiumHighlightShortcut(event)) return;
+  if (handleVimiumDeleteShortcut(event)) return;
+  if (handleDigitShortcut(event)) return;
+
   if (matchesShortcut(event, state.highlightShortcut)) {
     const selectionData = getCurrentSelectionData();
     if (selectionData) {
       event.preventDefault();
-      addTextAnnotation(selectionData, state.highlightColor, "highlight");
+      addTextAnnotation(selectionData, state.highlightColor, "highlight", { preserveSelection: true });
     }
     return;
   }
@@ -498,6 +502,37 @@ function handleKeydown(event) {
     if (target) removeAnnotation(target.dataset.whlId);
     else if (!annotationMenu.hidden) removeAnnotation(annotationMenu.dataset.whlId);
   }
+}
+
+function handleDigitShortcut(event) {
+  const digitColor = colorForDigitShortcut(event);
+  if (!digitColor) return false;
+  if (isEditableTarget(event.target)) return false;
+  const selectionData = getCurrentSelectionData("digit-shortcut");
+  if (!selectionData) return false;
+  event.preventDefault();
+  addTextAnnotation(selectionData, digitColor, "highlight", { preserveSelection: true });
+  return true;
+}
+
+function handleVimiumHighlightShortcut(event) {
+  if (!isPlainKey(event, "y")) return false;
+  if (isEditableTarget(event.target)) return false;
+  const selectionData = getCurrentSelectionData("vimium-y");
+  if (!selectionData) return false;
+  event.preventDefault();
+  addTextAnnotation(selectionData, lastUsedHighlightColor(), "highlight", { preserveSelection: true });
+  return true;
+}
+
+function handleVimiumDeleteShortcut(event) {
+  if (!isPlainKey(event, "d")) return false;
+  if (isEditableTarget(event.target)) return false;
+  const hit = findTextAnnotationForKeyboardAction();
+  if (!hit) return false;
+  event.preventDefault();
+  removeAnnotation(hit.annotation.id);
+  return true;
 }
 
 function startPenStroke(event) {
@@ -1448,8 +1483,30 @@ function normalizedPalette() {
   return all.slice(0, 8);
 }
 
+function lastUsedHighlightColor() {
+  const recent = Array.isArray(state.recentColors) ? state.recentColors.find(isHexColor) : null;
+  return recent || state.highlightColor || DEFAULT_STATE.highlightColor;
+}
+
 function isHexColor(value) {
   return /^#[0-9a-f]{6}$/i.test(String(value || ""));
+}
+
+function colorForDigitShortcut(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.repeat) return null;
+  const match = /^Digit([1-8])$/.exec(event.code || "") || /^Numpad([1-8])$/.exec(event.code || "");
+  const number = Number(match?.[1] || (/^[1-8]$/.test(event.key) ? event.key : 0));
+  if (!number) return null;
+  return normalizedPalette()[number - 1] || null;
+}
+
+function isPlainKey(event, key) {
+  return !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !event.repeat && event.key?.toLowerCase() === key;
+}
+
+function isEditableTarget(target) {
+  if (!target?.closest) return false;
+  return Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true'], [contenteditable='plaintext-only']"));
 }
 
 function matchesShortcut(event, shortcut) {
@@ -1483,6 +1540,51 @@ function findTextAnnotationAtPoint(point) {
     }
   }
   return null;
+}
+
+function findTextAnnotationForKeyboardAction() {
+  const selectionPoint = currentSelectionCenterPoint();
+  if (selectionPoint) {
+    const hit = findTextAnnotationAtPoint(selectionPoint);
+    if (hit) return hit;
+  }
+
+  const activePoint = activeElementCenterPoint();
+  if (activePoint) {
+    const hit = findTextAnnotationAtPoint(activePoint);
+    if (hit) return hit;
+  }
+
+  return findTextAnnotationAtPoint({
+    x: window.scrollX + window.innerWidth / 2,
+    y: window.scrollY + window.innerHeight / 2
+  });
+}
+
+function currentSelectionCenterPoint() {
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  const rect = selection.isCollapsed ? caretRect(range) : selectionRect(range);
+  if (!rect || (rect.width <= 0 && rect.height <= 0)) return null;
+  return {
+    x: window.scrollX + rect.left + Math.max(1, rect.width) / 2,
+    y: window.scrollY + rect.top + Math.max(1, rect.height) / 2
+  };
+}
+
+function caretRect(range) {
+  const rect = range.getClientRects?.()[0] || range.getBoundingClientRect?.();
+  if (rect && (rect.width > 0 || rect.height > 0)) return rect;
+  return null;
+}
+
+function activeElementCenterPoint() {
+  const element = document.activeElement;
+  if (!element || element === document.body || element === document.documentElement || isWhlNode(element)) return null;
+  const rect = element.getBoundingClientRect?.();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  return { x: window.scrollX + rect.left + rect.width / 2, y: window.scrollY + rect.top + rect.height / 2 };
 }
 
 function simplifyPoints(points, minDistance) {
