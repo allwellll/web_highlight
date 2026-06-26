@@ -516,9 +516,9 @@ function handleDigitShortcut(event) {
 }
 
 function handleVimiumHighlightShortcut(event) {
-  if (!isPlainKey(event, "y")) return false;
+  if (!isPlainKey(event, "m")) return false;
   if (isEditableTarget(event.target)) return false;
-  const selectionData = getCurrentSelectionData("vimium-y");
+  const selectionData = getCurrentSelectionData("vimium-m");
   if (!selectionData) return false;
   event.preventDefault();
   addTextAnnotation(selectionData, lastUsedHighlightColor(), "highlight", { preserveSelection: true });
