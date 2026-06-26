@@ -21,6 +21,7 @@ const DEFAULT_STATE = {
   highlightPalette: ["#f0d86a", "#8dc49b", "#e4a882", "#87CEFA", "#d4909a", "#a894e8"],
   recentColors: [],
   highlightShortcut: "Alt+H",
+  floatingColorPanelEnabled: true,
   penColor: "#e53935",
   penWidth: 4,
   modePinned: false,
@@ -94,6 +95,7 @@ function bindEvents() {
       state = { ...state, ...message.state };
       persistState();
       applyModeClass();
+      if (!state.floatingColorPanelEnabled) hideSelectionMenu();
       debugLog("mode applied", { mode: state.mode, modePinned: state.modePinned });
       sendResponse({ ok: true, state });
       return false;
@@ -390,6 +392,11 @@ function showSelectionMenuFromCurrentSelection(source = "unknown") {
     debugLog("menu skipped: not text mode", { source, mode: state.mode });
     return;
   }
+  if (!state.floatingColorPanelEnabled) {
+    debugLog("menu skipped: floating color panel disabled", { source });
+    hideSelectionMenu();
+    return;
+  }
   const selectionData = getCurrentSelectionData(source);
   if (!selectionData) return;
   pendingSelection = selectionData;
@@ -484,6 +491,7 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
 }
 
 function handleKeydown(event) {
+  if (handleFloatingColorPanelShortcut(event)) return;
   if (handleVimiumHighlightShortcut(event)) return;
   if (handleVimiumDeleteShortcut(event)) return;
   if (handleDigitShortcut(event)) return;
@@ -502,6 +510,17 @@ function handleKeydown(event) {
     if (target) removeAnnotation(target.dataset.whlId);
     else if (!annotationMenu.hidden) removeAnnotation(annotationMenu.dataset.whlId);
   }
+}
+
+function handleFloatingColorPanelShortcut(event) {
+  if (!matchesShortcut(event, "Alt+M")) return false;
+  if (isEditableTarget(event.target)) return false;
+  event.preventDefault();
+  state = { ...state, floatingColorPanelEnabled: !state.floatingColorPanelEnabled };
+  persistState();
+  if (!state.floatingColorPanelEnabled) hideSelectionMenu();
+  else showSelectionMenuFromCurrentSelection("floating-panel-shortcut");
+  return true;
 }
 
 function handleDigitShortcut(event) {

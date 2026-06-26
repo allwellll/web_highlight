@@ -18,6 +18,7 @@ const syncStatus = document.querySelector("#syncStatus");
 const clearPage = document.querySelector("#clearPage");
 const cleanupLocal = document.querySelector("#cleanupLocal");
 const saveSync = document.querySelector("#saveSync");
+const floatingColorPanelToggle = document.querySelector("#floatingColorPanelToggle");
 
 let currentState = {};
 
@@ -56,6 +57,10 @@ async function init() {
 
   inputs.highlightPalette.addEventListener("change", () => {
     updateContentState(tab.id, { highlightPalette: parsePalette(inputs.highlightPalette.value) });
+  });
+
+  floatingColorPanelToggle.addEventListener("click", () => {
+    updateContentState(tab.id, { floatingColorPanelEnabled: currentState.floatingColorPanelEnabled === false });
   });
 
   clearPage.addEventListener("click", () => {
@@ -185,6 +190,8 @@ function syncStateToForm(state) {
   inputs.penColor.value = state.penColor || "#e53935";
   inputs.penWidth.value = state.penWidth || 4;
   modeButtons.forEach((button) => button.classList.toggle("active", button.dataset.mode === state.mode));
+  floatingColorPanelToggle.textContent = state.floatingColorPanelEnabled === false ? "颜色浮窗：关闭" : "颜色浮窗：开启";
+  floatingColorPanelToggle.classList.toggle("active", state.floatingColorPanelEnabled !== false);
 }
 
 function parsePalette(value) {
@@ -219,9 +226,10 @@ function formatSyncStatus(sync) {
 }
 
 function statusText(state, prefix) {
+  const panelText = state?.floatingColorPanelEnabled === false ? "，颜色面板已关闭" : "，选中文字会弹颜色菜单";
   if (state?.mode === "browse") return `${prefix}：浏览模式下选中文字不会弹菜单`;
-  if (state?.mode === "highlight") return `${prefix}：高亮模式，选中文字会弹颜色菜单`;
-  if (state?.mode === "underline") return `${prefix}：划线模式，选中文字会弹颜色菜单`;
+  if (state?.mode === "highlight") return `${prefix}：高亮模式${panelText}`;
+  if (state?.mode === "underline") return `${prefix}：划线模式${panelText}`;
   if (state?.mode === "pen") return `${prefix}：画笔模式，可拖动绘制`;
   if (state?.mode === "eraser") return `${prefix}：删除模式，可点击标注删除`;
   return prefix;
