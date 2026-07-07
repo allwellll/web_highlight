@@ -1532,11 +1532,13 @@ function matchesShortcut(event, shortcut) {
   const parts = String(shortcut || "").split("+").map((item) => item.trim().toLowerCase()).filter(Boolean);
   const key = parts.find((part) => !["ctrl", "control", "cmd", "meta", "alt", "shift"].includes(part));
   if (!key) return false;
+  const eventKey = event.key?.toLowerCase();
+  const eventCodeKey = /^Key[A-Z]$/.test(event.code || "") ? event.code.slice(3).toLowerCase() : null;
   return event.ctrlKey === (parts.includes("ctrl") || parts.includes("control"))
     && event.metaKey === (parts.includes("cmd") || parts.includes("meta"))
     && event.altKey === parts.includes("alt")
     && event.shiftKey === parts.includes("shift")
-    && event.key.toLowerCase() === key;
+    && (eventKey === key || eventCodeKey === key);
 }
 
 function isTextMode() {
