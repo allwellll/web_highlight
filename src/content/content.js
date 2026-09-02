@@ -40,6 +40,7 @@ let minimapEl = null;
 let minimapViewport = null;
 let minimapStyle = null;
 let minimapDots = [];
+let minimapScrollContainer = null;
 let pendingSelection = null;
 let currentStroke = null;
 let currentPath = null;
@@ -486,7 +487,8 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
   recordRecentColor(color);
   if (!options.preserveSelection) clearSelection();
   hideSelectionMenu();
-  renderTextAnnotations();
+  const minimapCandidates = renderTextAnnotations();
+  renderMinimap(minimapCandidates);
   queueSave();
 }
 
@@ -879,41 +881,95 @@ function removeAnnotation(id) {
 function renderAll() {
   ensureOverlayNodesConnected();
   resizeLayers();
-  renderTextAnnotations();
+  const minimapCandidates = renderTextAnnotations();
   renderStrokes();
-  renderMinimap();
+  renderMinimap(minimapCandidates);
   showScrollableOverlayAfterScroll();
 }
 
-function renderMinimap() {
-  if (!minimapEl) return;
-  const marks = highlightLayer.querySelectorAll(".whl-text-mark[data-whl-id]");
-  const seen = new Set();
-  const dots = [];
-  for (const mark of marks) {
-    const id = mark.dataset.whlId;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const color = mark.style.getPropertyValue("--whl-color") || "#f5e79e";
-    const top = parseFloat(mark.style.top);
-    if (!Number.isFinite(top)) continue;
-    dots.push({ id, top, color });
-  }
+function isViewportScroller(scroller) {
+  return !scroller || scroller === document.body || scroller === document.documentElement || scroller === document.scrollingElement;
+}
 
-  minimapDots = dots;
-  const hasContent = dots.length > 0;
+function findMinimapScrollContainer(node) {
+  let element = node instanceof Element ? node : node?.parentElement;
+  while (element && !isViewportScroller(element)) {
+    const style = getComputedStyle(element);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && element.scrollHeight > element.clientHeight + 1) return element;
+    element = element.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+function minimapScrollMetrics(scroller = minimapScrollContainer) {
+  if (isViewportScroller(scroller)) {
+    return {
+      isViewport: true,
+      scrollTop: window.scrollY,
+      scrollHeight: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1),
+      viewportHeight: window.innerHeight,
+      viewportTop: 0
+    };
+  }
+  const rect = scroller.getBoundingClientRect();
+  return {
+    isViewport: false,
+    scrollTop: scroller.scrollTop,
+    scrollHeight: Math.max(scroller.scrollHeight, 1),
+    viewportHeight: scroller.clientHeight,
+    viewportTop: rect.top
+  };
+}
+
+function contentTopFromViewport(rectTop, scrollTop, viewportTop) {
+  return rectTop - viewportTop + scrollTop;
+}
+
+function createMinimapCandidate(highlight, range, rect) {
+  const anchorNode = range?.commonAncestorContainer || visualAnchorRoot(highlight.visualAnchor);
+  const scroller = findMinimapScrollContainer(anchorNode);
+  const metrics = minimapScrollMetrics(scroller);
+  return {
+    id: highlight.id,
+    top: contentTopFromViewport(rect.top, metrics.scrollTop, metrics.viewportTop),
+    color: highlight.color || DEFAULT_STATE.highlightColor,
+    scroller
+  };
+}
+
+function selectMinimapGroup(candidates) {
+  const groups = new Map();
+  for (const candidate of candidates) {
+    const dots = groups.get(candidate.scroller) || [];
+    dots.push(candidate);
+    groups.set(candidate.scroller, dots);
+  }
+  let selected = { scroller: null, dots: [], scrollHeight: 0 };
+  for (const [scroller, dots] of groups) {
+    const scrollHeight = minimapScrollMetrics(scroller).scrollHeight;
+    if (dots.length > selected.dots.length || (dots.length === selected.dots.length && scrollHeight > selected.scrollHeight)) {
+      selected = { scroller, dots, scrollHeight };
+    }
+  }
+  return selected;
+}
+
+function renderMinimap(candidates) {
+  if (!minimapEl) return;
+  for (const element of minimapEl.querySelectorAll(".whl-minimap-dot")) element.remove();
+  const selected = selectMinimapGroup(candidates);
+  minimapScrollContainer = selected.scroller;
+  minimapDots = selected.dots.sort((a, b) => a.top - b.top);
+  const hasContent = minimapDots.length > 0;
   minimapEl.classList.toggle("whl-minimap-visible", hasContent);
   if (!hasContent) return;
-
-  const oldDotEls = minimapEl.querySelectorAll(".whl-minimap-dot");
-  for (const el of oldDotEls) el.remove();
-
-  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1);
+  const { scrollHeight } = minimapScrollMetrics();
   const fragment = document.createDocumentFragment();
-  for (const dot of dots) {
+  for (const dot of minimapDots) {
     const el = document.createElement("div");
+    const topRatio = Math.max(0, Math.min(1, dot.top / scrollHeight));
     el.className = "whl-minimap-dot";
-    el.style.cssText = `top: ${(dot.top / pageHeight) * 100}% !important; background: ${dot.color} !important;`;
+    el.style.cssText = `top: ${topRatio * 100}% !important; background: ${dot.color} !important;`;
     el.dataset.whlDotId = dot.id;
     fragment.appendChild(el);
   }
@@ -923,37 +979,40 @@ function renderMinimap() {
 
 function updateMinimapViewport() {
   if (!minimapViewport || !minimapEl.classList.contains("whl-minimap-visible")) return;
-  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1);
-  const viewportRatio = window.innerHeight / pageHeight;
-  const scrollRatio = window.scrollY / pageHeight;
+  if (!isViewportScroller(minimapScrollContainer) && !minimapScrollContainer.isConnected) {
+    scheduleRenderAll();
+    return;
+  }
+  const metrics = minimapScrollMetrics();
+  const viewportRatio = Math.min(1, metrics.viewportHeight / metrics.scrollHeight);
+  const scrollRatio = Math.max(0, Math.min(1 - viewportRatio, metrics.scrollTop / metrics.scrollHeight));
   minimapViewport.style.top = `${scrollRatio * 100}%`;
   minimapViewport.style.height = `${viewportRatio * 100}%`;
 }
 
 function handleMinimapClick(event) {
-  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, 1);
+  const metrics = minimapScrollMetrics();
   const rect = minimapEl.getBoundingClientRect();
-  const clickRatio = (event.clientY - rect.top) / rect.height;
-  const targetY = clickRatio * pageHeight;
-
+  const clickRatio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+  const targetY = clickRatio * metrics.scrollHeight;
   let nearest = null;
   let bestDist = Infinity;
   for (const dot of minimapDots) {
     const dist = Math.abs(dot.top - targetY);
     if (dist < bestDist) { bestDist = dist; nearest = dot; }
   }
-
-  if (nearest && bestDist < window.innerHeight) {
-    window.scrollTo({ top: nearest.top - window.innerHeight / 3, behavior: "smooth" });
-  } else {
-    window.scrollTo({ top: targetY - window.innerHeight / 2, behavior: "smooth" });
-  }
+  const top = nearest && bestDist < metrics.viewportHeight
+    ? nearest.top - metrics.viewportHeight / 3
+    : targetY - metrics.viewportHeight / 2;
+  if (metrics.isViewport) window.scrollTo({ top, behavior: "smooth" });
+  else minimapScrollContainer.scrollTo({ top, behavior: "smooth" });
 }
 
 function renderTextAnnotations() {
   highlightLayer.textContent = "";
   clearNativeTextHighlights();
   const fragment = document.createDocumentFragment();
+  const minimapCandidates = [];
   const nativeRules = [];
   const useNativeHighlights = supportsNativeHighlights();
   const textIndex = getTextIndex();
@@ -961,6 +1020,7 @@ function renderTextAnnotations() {
     const range = annotationToRange(highlight, textIndex);
     const rectResult = annotationRects(highlight, range);
     if (!rectResult.rects.length) continue;
+    minimapCandidates.push(createMinimapCandidate(highlight, range, rectResult.rects[0]));
     let nativeRange = null;
     if (useNativeHighlights) {
       if (range) {
@@ -991,6 +1051,7 @@ function renderTextAnnotations() {
   }
   nativeHighlightStyle.textContent = nativeRules.join("\n");
   highlightLayer.appendChild(fragment);
+  return minimapCandidates;
 }
 
 
