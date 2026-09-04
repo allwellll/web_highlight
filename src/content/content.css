@@ -35,11 +35,6 @@
   border-radius: 0;
 }
 
-.whl-native-hitbox {
-  background: transparent;
-  border-bottom-color: transparent;
-}
-
 .whl-text-mark.whl-eraser-target,
 .whl-pen-path.whl-eraser-target {
   outline: 2px solid rgba(255, 80, 80, 0.9);

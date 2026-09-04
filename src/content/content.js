@@ -13,8 +13,9 @@ const MIN_ANCHOR_SCORE = 64;
 const STATE_VERSION = 2;
 const DYNAMIC_RENDER_DELAY = 300;
 const SCROLL_RENDER_DELAY = 500;
+const RESIZE_RENDER_SUPPRESSION_MS = 100;
 const DEBUG_HOSTS = ["ns01.plusai.io"];
-const DEBUG_ENABLED = DEBUG_HOSTS.includes(location.hostname);
+const DEBUG_ENABLED = isDebugEnabled();
 const DEFAULT_STATE = {
   mode: "highlight",
   highlightColor: "#f0d86a",
@@ -36,6 +37,7 @@ let selectionMenu;
 let annotationMenu;
 let nativeHighlightStyle;
 let nativeHighlightNames = [];
+let textAnnotationHitboxes = [];
 let minimapEl = null;
 let minimapViewport = null;
 let minimapStyle = null;
@@ -48,6 +50,8 @@ let saveTimer = null;
 let selectionChangeTimer = null;
 let dynamicRenderTimer = null;
 let scrollRenderTimer = null;
+let dynamicRenderDeferred = false;
+let suppressResizeRenderUntil = 0;
 let isScrolling = false;
 let mutationObserver = null;
 let resizeObserver = null;
@@ -77,6 +81,8 @@ function bindEvents() {
   document.addEventListener("mousedown", handleDocumentMouseDown, true);
   document.addEventListener("click", handleDocumentClick, true);
   document.addEventListener("keydown", handleKeydown, true);
+  document.addEventListener("focusin", handleEditableFocusIn, true);
+  document.addEventListener("focusout", handleEditableFocusOut, true);
   document.addEventListener("visibilitychange", ensureOverlayNodesConnected);
   window.addEventListener("focus", ensureOverlayNodesConnected);
   window.addEventListener("resize", () => { scheduleDynamicRender("window resize"); updateMinimapViewport(); });
@@ -136,7 +142,10 @@ function bindDynamicRenderEvents() {
 
   if (!globalThis.ResizeObserver) return;
   resizeObserver?.disconnect();
-  resizeObserver = new ResizeObserver(() => scheduleDynamicRender("layout resize"));
+  resizeObserver = new ResizeObserver(() => {
+    if (performance.now() < suppressResizeRenderUntil) return;
+    scheduleDynamicRender("layout resize");
+  });
   resizeObserver.observe(document.documentElement);
   if (document.body) resizeObserver.observe(document.body);
 }
@@ -154,7 +163,13 @@ function handleResourceLoad(event) {
 
 function scheduleDynamicRender(reason) {
   clearTimeout(dynamicRenderTimer);
+  if (isEditableTarget(document.activeElement)) {
+    dynamicRenderDeferred = true;
+    return;
+  }
+  dynamicRenderDeferred = false;
   dynamicRenderTimer = setTimeout(() => {
+    dynamicRenderTimer = null;
     debugLog("dynamic render", { reason });
     scheduleRenderAll();
   }, DYNAMIC_RENDER_DELAY);
@@ -167,7 +182,13 @@ function handleDocumentScroll() {
   hideScrollableOverlayDuringScroll();
   clearTimeout(scrollRenderTimer);
   scrollRenderTimer = setTimeout(() => {
+    scrollRenderTimer = null;
     isScrolling = false;
+    if (isEditableTarget(document.activeElement)) {
+      dynamicRenderDeferred = true;
+      showScrollableOverlayAfterScroll();
+      return;
+    }
     debugLog("scroll render");
     scheduleRenderAll();
     showScrollableOverlayAfterScroll();
@@ -188,6 +209,7 @@ function showScrollableOverlayAfterScroll() {
 
 function isExternalMutation(record) {
   if (isWhlNode(record.target)) return false;
+  if (isEditableTarget(record.target)) return false;
   const addedNodes = [...record.addedNodes];
   const removedNodes = [...record.removedNodes];
   if (removedNodes.some(isOverlayRootNode)) return true;
@@ -369,22 +391,34 @@ function requestRemoteData() {
 }
 
 function handleSelection(event) {
+  clearTimeout(selectionChangeTimer);
+  if (isEditableTarget(event?.target) || isEditableTarget(document.activeElement)) {
+    hideSelectionMenu();
+    return;
+  }
   if (event?.target && (selectionMenu.contains(event.target) || annotationMenu.contains(event.target))) {
     debugLog("selection ignored: menu target", debugEventTarget(event.target));
     return;
   }
   debugLog("mouseup selection check", { mode: state.mode, target: debugEventTarget(event?.target) });
-  showSelectionMenuFromCurrentSelection("mouseup");
+  showSelectionMenuFromCurrentSelection("mouseup", pointerAnchorRect(event));
 }
 
 function scheduleSelectionMenu() {
   clearTimeout(selectionChangeTimer);
-  debugLog("selectionchange scheduled", debugSelectionSnapshot());
+  if (isEditableTarget(document.activeElement)) {
+    hideSelectionMenu();
+    return;
+  }
   selectionChangeTimer = setTimeout(() => showSelectionMenuFromCurrentSelection("selectionchange"), 80);
 }
 
-function showSelectionMenuFromCurrentSelection(source = "unknown") {
+function showSelectionMenuFromCurrentSelection(source = "unknown", anchorRect = null) {
   ensureOverlayNodesConnected();
+  if (isEditableTarget(document.activeElement)) {
+    hideSelectionMenu();
+    return;
+  }
   if (Date.now() < suppressSelectionMenuUntil) {
     debugLog("menu skipped: recently dismissed", { source, suppressSelectionMenuUntil });
     return;
@@ -398,7 +432,7 @@ function showSelectionMenuFromCurrentSelection(source = "unknown") {
     hideSelectionMenu();
     return;
   }
-  const selectionData = getCurrentSelectionData(source);
+  const selectionData = getCurrentSelectionData(source, anchorRect);
   if (!selectionData) return;
   pendingSelection = selectionData;
   debugLog("menu render requested", {
@@ -413,7 +447,7 @@ function showSelectionMenuFromCurrentSelection(source = "unknown") {
   renderSelectionMenu(selectionData.rect, state.mode);
 }
 
-function getCurrentSelectionData(source = "unknown") {
+function getCurrentSelectionData(source = "unknown", anchorRect = null) {
   const selection = window.getSelection();
   if (!selection) {
     debugLog("selection skipped: no selection", { source });
@@ -429,6 +463,10 @@ function getCurrentSelectionData(source = "unknown") {
     return null;
   }
   const range = selection.getRangeAt(0);
+  if (isEditableTarget(range.commonAncestorContainer) || isEditableTarget(range.startContainer) || isEditableTarget(range.endContainer)) {
+    hideSelectionMenu();
+    return null;
+  }
   if (!document.body.contains(range.commonAncestorContainer)) {
     debugLog("selection skipped: outside body", {
       source,
@@ -439,49 +477,35 @@ function getCurrentSelectionData(source = "unknown") {
     return null;
   }
 
-  const visualAnchor = createVisualAnchor(range);
   const normalizedRange = normalizeKatexRange(range);
   const selectedText = normalizedRange.toString();
-  const offsets = rangeToOffsets(normalizedRange);
-  if ((!offsets || offsets.start === offsets.end) && !visualAnchor) {
-    debugLog("selection skipped: no usable anchor", {
-      source,
-      textLength: selectedText.length,
-      textPreview: selectedText.slice(0, 60),
-      offsets,
-      hasVisualAnchor: Boolean(visualAnchor),
-      rect: debugRect(selectionRect(range)),
-      commonAncestor: debugNode(range.commonAncestorContainer),
-      start: debugNode(range.startContainer),
-      end: debugNode(range.endContainer)
-    });
-    return null;
-  }
-
   return {
-    start: offsets?.start,
-    end: offsets?.end,
     text: selectedText,
     _range: normalizedRange.cloneRange(),
-    visualAnchor,
-    rect: selectionRect(range)
+    rect: anchorRect || selectionRect(range)
   };
 }
 
+function pointerAnchorRect(event) {
+  if (!event || (!event.clientX && !event.clientY)) return null;
+  return { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY, width: 0, height: 0 };
+}
+
 function addTextAnnotation(selectionData, color, type = state.mode, options = {}) {
-  if (!selectionData || !isHexColor(color)) return;
-  const anchor = (selectionData._range && Number.isInteger(selectionData.start))
-    ? createTextAnchor(selectionData._range, { start: selectionData.start, end: selectionData.end }, selectionData.text)
+  const resolvedSelection = resolveSelectionData(selectionData);
+  if (!resolvedSelection || !isHexColor(color)) return;
+  const anchor = (resolvedSelection._range && Number.isInteger(resolvedSelection.start))
+    ? createTextAnchor(resolvedSelection._range, resolvedSelection, resolvedSelection.text)
     : null;
   pageData.highlights.push({
     id: createId(),
     type: type === "underline" ? "underline" : "highlight",
     color,
-    text: selectionData.text,
-    start: selectionData.start,
-    end: selectionData.end,
+    text: resolvedSelection.text,
+    start: resolvedSelection.start,
+    end: resolvedSelection.end,
     anchor,
-    visualAnchor: selectionData.visualAnchor,
+    visualAnchor: resolvedSelection.visualAnchor,
     createdAt: Date.now()
   });
   recordRecentColor(color);
@@ -490,6 +514,17 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
   const minimapCandidates = renderTextAnnotations();
   renderMinimap(minimapCandidates);
   queueSave();
+}
+
+function resolveSelectionData(selectionData) {
+  if (!selectionData) return null;
+  const range = selectionData._range;
+  const offsets = Number.isInteger(selectionData.start) && Number.isInteger(selectionData.end)
+    ? { start: selectionData.start, end: selectionData.end }
+    : range ? rangeToOffsets(range) : null;
+  const visualAnchor = selectionData.visualAnchor || (range ? createVisualAnchor(range) : null);
+  if ((!offsets || offsets.start === offsets.end) && !visualAnchor) return null;
+  return { ...selectionData, start: offsets?.start, end: offsets?.end, visualAnchor };
 }
 
 function handleKeydown(event) {
@@ -613,6 +648,8 @@ function handleDocumentClick(event) {
   if (selectionMenu.contains(event.target) || annotationMenu.contains(event.target)) return;
   const target = event.target.closest?.("[data-whl-id]");
   if (target) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed) return;
 
   const interactive = event.target?.closest?.("button, a, input, select, textarea, [role='button'], [role='link']");
   if (interactive && !isWhlNode(interactive)) return;
@@ -623,7 +660,7 @@ function handleDocumentClick(event) {
     event.preventDefault();
     event.stopPropagation();
     if (state.mode === "eraser") removeAnnotation(textHit.annotation.id);
-    else showAnnotationMenuForMark(textHit.annotation.id, textHit.mark, point.x, point.y);
+    else showAnnotationMenuForMark(textHit.annotation.id, textHit.mark, point.x, point.y, textHit);
     return;
   }
 
@@ -852,17 +889,20 @@ function showAnnotationMenu(id, pageX, pageY) {
   annotationMenu.style.top = `${Math.max(8, pageY - 42)}px`;
 }
 
-function showAnnotationMenuForMark(id, mark, pageX, pageY) {
-  if (!mark.classList.contains("whl-underline")) {
+function showAnnotationMenuForMark(id, mark, pageX, pageY, hitbox = null) {
+  const annotation = pageData.highlights.find((item) => item.id === id);
+  const isUnderline = mark?.classList.contains("whl-underline") || annotation?.type === "underline";
+  if (!isUnderline) {
     showAnnotationMenu(id, pageX, pageY);
     return;
   }
-
-  const rect = mark.getBoundingClientRect();
+  const rect = hitbox || mark.getBoundingClientRect();
+  const left = hitbox ? rect.left : rect.left + window.scrollX;
+  const bottom = hitbox ? rect.bottom : rect.bottom + window.scrollY;
   annotationMenu.dataset.whlId = id;
   annotationMenu.hidden = false;
-  annotationMenu.style.left = `${Math.max(8, rect.left + window.scrollX)}px`;
-  annotationMenu.style.top = `${Math.max(8, rect.bottom + window.scrollY + 6)}px`;
+  annotationMenu.style.left = `${Math.max(8, left)}px`;
+  annotationMenu.style.top = `${Math.max(8, bottom + 6)}px`;
 }
 
 function hideAnnotationMenu() {
@@ -879,6 +919,7 @@ function removeAnnotation(id) {
 }
 
 function renderAll() {
+  suppressResizeRenderUntil = performance.now() + RESIZE_RENDER_SUPPRESSION_MS;
   ensureOverlayNodesConnected();
   resizeLayers();
   const minimapCandidates = renderTextAnnotations();
@@ -1010,10 +1051,11 @@ function handleMinimapClick(event) {
 
 function renderTextAnnotations() {
   highlightLayer.textContent = "";
+  textAnnotationHitboxes = [];
   clearNativeTextHighlights();
   const fragment = document.createDocumentFragment();
   const minimapCandidates = [];
-  const nativeRules = [];
+  const nativeGroups = new Map();
   const useNativeHighlights = supportsNativeHighlights();
   const textIndex = getTextIndex();
   for (const highlight of pageData.highlights) {
@@ -1030,13 +1072,16 @@ function renderTextAnnotations() {
       }
     }
     if (nativeRange) {
-      renderNativeTextAnnotation(highlight, nativeRange, nativeRules);
+      collectNativeTextAnnotation(highlight, nativeRange, nativeGroups);
     }
     for (const rect of rectResult.rects) {
+      const hitbox = createTextAnnotationHitbox(highlight, rect);
+      textAnnotationHitboxes.push(hitbox);
+      if (nativeRange) continue;
       const node = document.createElement("div");
       const typeClass = annotationType(highlight) === "underline" ? "whl-underline" : "whl-highlight";
-      const isVisualFallback = rectResult.usedVisualAnchor && !nativeRange;
-      node.className = `whl-text-mark ${typeClass}${nativeRange ? " whl-native-hitbox" : ""}${isVisualFallback ? " whl-visual-anchor" : ""}`;
+      const isVisualFallback = rectResult.usedVisualAnchor;
+      node.className = `whl-text-mark ${typeClass}${isVisualFallback ? " whl-visual-anchor" : ""}`;
       node.dataset.whlId = highlight.id;
       node.title = "点击打开操作菜单";
       node.style.setProperty("--whl-color", highlight.color || DEFAULT_STATE.highlightColor);
@@ -1046,12 +1091,26 @@ function renderTextAnnotations() {
       node.style.top = `${rect.top + window.scrollY}px`;
       node.style.width = `${rect.width}px`;
       node.style.height = `${rect.height}px`;
+      hitbox.mark = node;
       fragment.appendChild(node);
     }
   }
-  nativeHighlightStyle.textContent = nativeRules.join("\n");
+  nativeHighlightStyle.textContent = renderNativeTextAnnotationGroups(nativeGroups).join("\n");
   highlightLayer.appendChild(fragment);
   return minimapCandidates;
+}
+
+function createTextAnnotationHitbox(annotation, rect) {
+  const left = rect.left + window.scrollX;
+  const top = rect.top + window.scrollY;
+  return {
+    annotation,
+    left,
+    top,
+    right: left + rect.width,
+    bottom: top + rect.height,
+    mark: null
+  };
 }
 
 
@@ -1140,16 +1199,27 @@ function supportsNativeHighlights() {
   return Boolean(globalThis.CSS?.highlights && globalThis.Highlight);
 }
 
-function renderNativeTextAnnotation(annotation, range, nativeRules) {
-  const name = nativeHighlightName(annotation.id);
+function collectNativeTextAnnotation(annotation, range, groups) {
+  const type = annotationType(annotation);
   const color = annotation.color || DEFAULT_STATE.highlightColor;
-  CSS.highlights.set(name, new Highlight(range));
-  nativeHighlightNames.push(name);
-  if (annotationType(annotation) === "underline") {
-    nativeRules.push(`::highlight(${name}) { text-decoration: underline 3px ${color}; text-underline-offset: 0.16em; }`);
-    return;
+  const key = `${type}:${color}`;
+  const group = groups.get(key) || { name: nativeHighlightGroupName(type, color), type, color, ranges: [] };
+  group.ranges.push(range);
+  groups.set(key, group);
+}
+
+function renderNativeTextAnnotationGroups(groups) {
+  const rules = [];
+  for (const group of groups.values()) {
+    CSS.highlights.set(group.name, new Highlight(...group.ranges));
+    nativeHighlightNames.push(group.name);
+    if (group.type === "underline") {
+      rules.push(`::highlight(${group.name}) { text-decoration: underline 3px ${group.color}; text-underline-offset: 0.16em; }`);
+    } else {
+      rules.push(`::highlight(${group.name}) { background-color: ${hexToRgba(group.color, 0.55)}; color: inherit; }`);
+    }
   }
-  nativeRules.push(`::highlight(${name}) { background-color: ${hexToRgba(color, 0.55)}; color: inherit; }`);
+  return rules;
 }
 
 function clearNativeTextHighlights() {
@@ -1160,8 +1230,8 @@ function clearNativeTextHighlights() {
   if (nativeHighlightStyle) nativeHighlightStyle.textContent = "";
 }
 
-function nativeHighlightName(id) {
-  return `whl-${String(id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+function nativeHighlightGroupName(type, color) {
+  return `whl-${type}-${String(color).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 function renderStrokes() {
@@ -1212,14 +1282,10 @@ function normalizeKatexRange(range) {
 
 function rangeToOffsets(range) {
   const textIndex = getTextIndex();
-  let start = null;
-  let end = null;
-  for (let index = 0; index < textIndex.nodes.length; index += 1) {
-    const node = textIndex.nodes[index];
-    if (node === range.startContainer) start = textIndex.starts[index] + range.startOffset;
-    if (node === range.endContainer) end = textIndex.starts[index] + range.endOffset;
-    if (Number.isInteger(start) && Number.isInteger(end)) break;
-  }
+  const startBase = textIndex.offsetByNode.get(range.startContainer);
+  const endBase = textIndex.offsetByNode.get(range.endContainer);
+  const start = Number.isInteger(startBase) ? startBase + range.startOffset : null;
+  const end = Number.isInteger(endBase) ? endBase + range.endOffset : null;
   return Number.isInteger(start) && Number.isInteger(end) ? { start, end } : null;
 }
 
@@ -1304,16 +1370,18 @@ function createTextIndex() {
   const nodes = [];
   const starts = [];
   const parts = [];
+  const offsetByNode = new WeakMap();
   let position = 0;
   const walker = textWalker();
   while (walker.nextNode()) {
     const value = walker.currentNode.nodeValue;
     nodes.push(walker.currentNode);
     starts.push(position);
+    offsetByNode.set(walker.currentNode, position);
     parts.push(value);
     position += value.length;
   }
-  return { nodes, starts, fullText: parts.join("") };
+  return { nodes, starts, offsetByNode, fullText: parts.join("") };
 }
 
 function getTextIndex() {
@@ -1454,6 +1522,7 @@ function isIgnoredTextNode(node) {
   if (!parent) return true;
   if (highlightLayer.contains(parent) || penLayer.contains(parent)) return true;
   if (minimapEl?.contains(parent)) return true;
+  if (isEditableTarget(parent)) return true;
   return Boolean(parent.closest("script, style, noscript, template, .katex-mathml, .whl-selection-menu, .whl-annotation-menu, .whl-minimap"));
 }
 
@@ -1585,8 +1654,28 @@ function isPlainKey(event, key) {
 }
 
 function isEditableTarget(target) {
-  if (!target?.closest) return false;
-  return Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true'], [contenteditable='plaintext-only']"));
+  const element = target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
+  if (!element?.closest) return false;
+  if (element.closest("input, textarea, select, [role='textbox']")) return true;
+  return element.isContentEditable || Boolean(element.closest("[contenteditable]:not([contenteditable='false'])"));
+}
+
+function handleEditableFocusIn(event) {
+  if (!isEditableTarget(event.target)) return;
+  if (dynamicRenderTimer) dynamicRenderDeferred = true;
+  clearTimeout(selectionChangeTimer);
+  clearTimeout(dynamicRenderTimer);
+  hideSelectionMenu();
+}
+
+function handleEditableFocusOut(event) {
+  if (!isEditableTarget(event.target)) return;
+  setTimeout(() => {
+    if (isEditableTarget(document.activeElement)) return;
+    if (!dynamicRenderDeferred) return;
+    dynamicRenderDeferred = false;
+    scheduleDynamicRender("editable blur");
+  }, 0);
 }
 
 function matchesShortcut(event, shortcut) {
@@ -1611,15 +1700,9 @@ function annotationType(annotation) {
 }
 
 function findTextAnnotationAtPoint(point) {
-  const viewportX = point.x - window.scrollX;
-  const viewportY = point.y - window.scrollY;
-  const marks = [...highlightLayer.querySelectorAll(".whl-text-mark")];
-  for (let index = marks.length - 1; index >= 0; index -= 1) {
-    const rect = marks[index].getBoundingClientRect();
-    if (viewportX >= rect.left && viewportX <= rect.right && viewportY >= rect.top && viewportY <= rect.bottom) {
-      const annotation = pageData.highlights.find((item) => item.id === marks[index].dataset.whlId);
-      return annotation ? { annotation, mark: marks[index] } : null;
-    }
+  for (let index = textAnnotationHitboxes.length - 1; index >= 0; index -= 1) {
+    const hitbox = textAnnotationHitboxes[index];
+    if (point.x >= hitbox.left && point.x <= hitbox.right && point.y >= hitbox.top && point.y <= hitbox.bottom) return hitbox;
   }
   return null;
 }
@@ -1847,6 +1930,14 @@ function hexToRgba(hex, alpha) {
 function debugLog(message, data = {}) {
   if (!DEBUG_ENABLED) return;
   console.info(`[WHL][${new Date().toISOString()}] ${message}`, data);
+}
+
+function isDebugEnabled() {
+  try {
+    return DEBUG_HOSTS.includes(location.hostname) && localStorage.getItem("whl:debug") === "1";
+  } catch (_error) {
+    return false;
+  }
 }
 
 function debugSelectionSnapshot(selection = window.getSelection?.()) {
