@@ -280,7 +280,21 @@ function createLayers() {
       transform: scale(0.92) !important;
     }
     .whl-color-expand-btn svg {
+      background: transparent !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      box-shadow: none !important;
+      box-sizing: border-box !important;
+      display: block !important;
+      height: 14px !important;
+      margin: 0 !important;
+      max-height: none !important;
+      max-width: none !important;
+      min-height: 0 !important;
+      min-width: 0 !important;
+      padding: 0 !important;
       transition: transform 0.2s ease !important;
+      width: 14px !important;
     }
     .whl-color-collapsed {
       animation: whl-color-expand 0.18s ease-out !important;

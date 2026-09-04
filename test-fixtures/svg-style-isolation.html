@@ -34,7 +34,7 @@
       white-space: pre-wrap;
     }
   </style>
-  <link rel="stylesheet" href="../src/content/content.css?svg-isolation=2">
+  <link rel="stylesheet" href="../src/content/content.css?svg-isolation=3">
 </head>
 <body>
   <main>
@@ -76,29 +76,61 @@
       }
     };
   </script>
-  <script src="../src/content/content.js?svg-isolation=2"></script>
+  <script src="../src/content/content.js?svg-isolation=4"></script>
   <script>
+    window.__whlListener({
+      type: "WHL_SET_MODE",
+      state: {
+        mode: "highlight",
+        floatingColorPanelEnabled: true,
+        highlightColor: "#f0d86a",
+        highlightPalette: ["#f0d86a", "#7cff7c", "#74c0fc", "#ffadad", "#d0bfff", "#ffd43b"]
+      }
+    }, null, () => {});
+
     setTimeout(() => {
+      const textNode = document.querySelector("h1").firstChild;
+      const range = document.createRange();
+      range.setStart(textNode, 0);
+      range.setEnd(textNode, 8);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+
       const layer = document.querySelector(".whl-pen-layer");
-      const rect = layer.getBoundingClientRect();
-      const style = getComputedStyle(layer);
+      const layerRect = layer.getBoundingClientRect();
+      const layerStyle = getComputedStyle(layer);
+      const expandButton = document.querySelector(".whl-color-expand-btn");
+      const expandIcon = expandButton?.querySelector("svg");
+      const buttonRect = expandButton?.getBoundingClientRect();
+      const iconRect = expandIcon?.getBoundingClientRect();
+      const iconStyle = expandIcon ? getComputedStyle(expandIcon) : null;
       document.querySelector("#result").textContent = JSON.stringify({
-        transparent: style.backgroundColor === "rgba(0, 0, 0, 0)",
-        borderless: style.borderTopWidth === "0px",
-        marginless: style.marginTop === "0px",
-        fillsDocument: Math.round(rect.height) >= document.documentElement.scrollHeight,
-        rect: {
-          width: Math.round(rect.width),
-          height: Math.round(rect.height)
+        penLayer: {
+          transparent: layerStyle.backgroundColor === "rgba(0, 0, 0, 0)",
+          borderless: layerStyle.borderTopWidth === "0px",
+          marginless: layerStyle.marginTop === "0px",
+          fillsDocument: Math.round(layerRect.height) >= document.documentElement.scrollHeight
         },
-        style: {
-          backgroundColor: style.backgroundColor,
-          borderTopWidth: style.borderTopWidth,
-          borderRadius: style.borderRadius,
-          marginTop: style.marginTop
+        expandButton: {
+          iconContained: Boolean(iconRect && buttonRect && iconRect.height <= 16 && iconRect.width <= 16 && iconRect.bottom <= buttonRect.bottom),
+          buttonRect: buttonRect && {
+            width: Math.round(buttonRect.width),
+            height: Math.round(buttonRect.height)
+          },
+          iconRect: iconRect && {
+            width: Math.round(iconRect.width),
+            height: Math.round(iconRect.height)
+          },
+          iconStyle: iconStyle && {
+            backgroundColor: iconStyle.backgroundColor,
+            borderTopWidth: iconStyle.borderTopWidth,
+            marginTop: iconStyle.marginTop
+          }
         }
       }, null, 2);
-    }, 150);
+    }, 200);
   </script>
 </body>
 </html>
