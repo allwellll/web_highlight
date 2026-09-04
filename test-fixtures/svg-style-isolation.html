@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>SVG Style Isolation</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+    }
+    main {
+      margin: 0 auto;
+      max-width: 900px;
+      padding: 18px 28px 40px;
+    }
+    header {
+      background: linear-gradient(135deg, #ffffff, #eaf4ff);
+      border: 1px solid #cfe2f5;
+      border-radius: 16px;
+      padding: 22px;
+    }
+    svg {
+      background: #f8fafc;
+      border: 1px solid #edf1f7;
+      border-radius: 8px;
+      height: 110px;
+      margin-top: 6px;
+      width: 100%;
+    }
+    output {
+      display: block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin-top: 24px;
+      white-space: pre-wrap;
+    }
+  </style>
+  <link rel="stylesheet" href="../src/content/content.css?svg-isolation=2">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>全量训练对比：GSPO vs Positive BC + 弱 GSPO</h1>
+      <p>验证页面全局 SVG 样式不会污染插件画笔层。</p>
+    </header>
+    <output id="result"></output>
+  </main>
+  <script>
+    window.__whlStore = {};
+    window.chrome = {
+      storage: {
+        local: {
+          async get(key) {
+            if (key == null) return { ...window.__whlStore };
+            if (typeof key === "string") return { [key]: window.__whlStore[key] };
+            return {};
+          },
+          async set(value) {
+            Object.assign(window.__whlStore, value);
+          },
+          async remove(keys) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) delete window.__whlStore[key];
+          }
+        }
+      },
+      runtime: {
+        onMessage: {
+          addListener(listener) {
+            window.__whlListener = listener;
+          }
+        },
+        sendMessage(message, callback) {
+          if (message.type === "WHL_LOAD_REMOTE") callback?.({ ok: true, payload: null });
+          if (message.type === "WHL_SAVE_REMOTE") callback?.({ ok: true, queued: true });
+          return Promise.resolve();
+        }
+      }
+    };
+  </script>
+  <script src="../src/content/content.js?svg-isolation=2"></script>
+  <script>
+    setTimeout(() => {
+      const layer = document.querySelector(".whl-pen-layer");
+      const rect = layer.getBoundingClientRect();
+      const style = getComputedStyle(layer);
+      document.querySelector("#result").textContent = JSON.stringify({
+        transparent: style.backgroundColor === "rgba(0, 0, 0, 0)",
+        borderless: style.borderTopWidth === "0px",
+        marginless: style.marginTop === "0px",
+        fillsDocument: Math.round(rect.height) >= document.documentElement.scrollHeight,
+        rect: {
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        },
+        style: {
+          backgroundColor: style.backgroundColor,
+          borderTopWidth: style.borderTopWidth,
+          borderRadius: style.borderRadius,
+          marginTop: style.marginTop
+        }
+      }, null, 2);
+    }, 150);
+  </script>
+</body>
+</html>

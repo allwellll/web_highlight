@@ -401,7 +401,7 @@ function handleSelection(event) {
     return;
   }
   debugLog("mouseup selection check", { mode: state.mode, target: debugEventTarget(event?.target) });
-  showSelectionMenuFromCurrentSelection("mouseup", pointerAnchorRect(event));
+  showSelectionMenuFromCurrentSelection("mouseup");
 }
 
 function scheduleSelectionMenu() {
@@ -413,7 +413,7 @@ function scheduleSelectionMenu() {
   selectionChangeTimer = setTimeout(() => showSelectionMenuFromCurrentSelection("selectionchange"), 80);
 }
 
-function showSelectionMenuFromCurrentSelection(source = "unknown", anchorRect = null) {
+function showSelectionMenuFromCurrentSelection(source = "unknown") {
   ensureOverlayNodesConnected();
   if (isEditableTarget(document.activeElement)) {
     hideSelectionMenu();
@@ -432,7 +432,7 @@ function showSelectionMenuFromCurrentSelection(source = "unknown", anchorRect = 
     hideSelectionMenu();
     return;
   }
-  const selectionData = getCurrentSelectionData(source, anchorRect);
+  const selectionData = getCurrentSelectionData(source);
   if (!selectionData) return;
   pendingSelection = selectionData;
   debugLog("menu render requested", {
@@ -447,7 +447,7 @@ function showSelectionMenuFromCurrentSelection(source = "unknown", anchorRect = 
   renderSelectionMenu(selectionData.rect, state.mode);
 }
 
-function getCurrentSelectionData(source = "unknown", anchorRect = null) {
+function getCurrentSelectionData(source = "unknown") {
   const selection = window.getSelection();
   if (!selection) {
     debugLog("selection skipped: no selection", { source });
@@ -482,13 +482,8 @@ function getCurrentSelectionData(source = "unknown", anchorRect = null) {
   return {
     text: selectedText,
     _range: normalizedRange.cloneRange(),
-    rect: anchorRect || selectionRect(range)
+    rect: selectionRect(range)
   };
-}
-
-function pointerAnchorRect(event) {
-  if (!event || (!event.clientX && !event.clientY)) return null;
-  return { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY, width: 0, height: 0 };
 }
 
 function addTextAnnotation(selectionData, color, type = state.mode, options = {}) {
@@ -1542,6 +1537,8 @@ function resizeLayers() {
   highlightLayer.style.height = `${height}px`;
   penLayer.setAttribute("width", width);
   penLayer.setAttribute("height", height);
+  penLayer.style.setProperty("width", `${width}px`, "important");
+  penLayer.style.setProperty("height", `${height}px`, "important");
 }
 
 

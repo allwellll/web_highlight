@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Selection Menu Stability</title>
+  <link rel="stylesheet" href="../src/content/content.css">
+  <style>
+    body {
+      font: 20px/1.8 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 100px;
+      max-width: 720px;
+    }
+    button {
+      font: inherit;
+      margin-bottom: 24px;
+      padding: 8px 16px;
+    }
+    output {
+      display: block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin-top: 24px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <button id="run" type="button">运行稳定性测试</button>
+  <p id="target">拖动选择这一段文字，用于验证颜色弹窗出现后不会从鼠标位置跳到选区边缘。</p>
+  <output id="result"></output>
+  <script>
+    window.__whlStore = {};
+    window.__whlMenuPositions = [];
+    window.chrome = {
+      storage: {
+        local: {
+          async get(key) {
+            if (key == null) return { ...window.__whlStore };
+            if (typeof key === "string") return { [key]: window.__whlStore[key] };
+            return {};
+          },
+          async set(value) {
+            Object.assign(window.__whlStore, value);
+          },
+          async remove(keys) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) delete window.__whlStore[key];
+          }
+        }
+      },
+      runtime: {
+        onMessage: {
+          addListener(listener) {
+            window.__whlListener = listener;
+          }
+        },
+        sendMessage(message, callback) {
+          if (message.type === "WHL_LOAD_REMOTE") callback?.({ ok: true, payload: null });
+          if (message.type === "WHL_SAVE_REMOTE") callback?.({ ok: true, queued: true });
+          return Promise.resolve();
+        }
+      }
+    };
+
+    function sampleMenuPosition() {
+      const menu = document.querySelector(".whl-selection-menu");
+      if (menu && !menu.hidden) {
+        const rect = menu.getBoundingClientRect();
+        window.__whlMenuPositions.push({ left: rect.left, top: rect.top });
+      }
+      requestAnimationFrame(sampleMenuPosition);
+    }
+    requestAnimationFrame(sampleMenuPosition);
+  </script>
+  <script src="../src/content/content.js?stability=2"></script>
+  <script>
+    window.__whlListener({
+      type: "WHL_SET_MODE",
+      state: {
+        mode: "highlight",
+        floatingColorPanelEnabled: true,
+        highlightColor: "#f0d86a",
+        highlightPalette: ["#f0d86a", "#7cff7c", "#74c0fc"]
+      }
+    }, null, () => {});
+
+    document.querySelector("#run").addEventListener("click", async () => {
+      window.__whlMenuPositions.length = 0;
+      const textNode = document.querySelector("#target").firstChild;
+      const range = document.createRange();
+      range.setStart(textNode, 0);
+      range.setEnd(textNode, 14);
+      const expectedLeft = Math.round(range.getBoundingClientRect().left);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        clientX: 520,
+        clientY: 190
+      }));
+      document.dispatchEvent(new Event("selectionchange"));
+      await new Promise((resolve) => setTimeout(resolve, 220));
+
+      const uniquePositions = [];
+      for (const position of window.__whlMenuPositions) {
+        const rounded = {
+          left: Math.round(position.left),
+          top: Math.round(position.top)
+        };
+        const previous = uniquePositions.at(-1);
+        if (!previous || previous.left !== rounded.left || previous.top !== rounded.top) uniquePositions.push(rounded);
+      }
+      document.querySelector("#result").textContent = JSON.stringify({
+        stable: new Set(uniquePositions.map((position) => `${position.left}:${position.top}`)).size === 1,
+        anchoredToSelection: uniquePositions[0]?.left === expectedLeft,
+        expectedLeft,
+        uniquePositions
+      }, null, 2);
+    });
+  </script>
+</body>
+</html>
