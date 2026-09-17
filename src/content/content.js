@@ -37,11 +37,13 @@ let selectionMenu;
 let annotationMenu;
 let nativeHighlightStyle;
 let nativeHighlightNames = [];
+let nativeHighlightGroups = new Map();
 let textAnnotationHitboxes = [];
 let minimapEl = null;
 let minimapViewport = null;
 let minimapStyle = null;
 let minimapDots = [];
+let minimapCandidatesCache = [];
 let minimapScrollContainer = null;
 let pendingSelection = null;
 let currentStroke = null;
@@ -53,6 +55,8 @@ let scrollRenderTimer = null;
 let dynamicRenderDeferred = false;
 let suppressResizeRenderUntil = 0;
 let isScrolling = false;
+let isTextSelectionInProgress = false;
+let textHighlightsSuspended = false;
 let mutationObserver = null;
 let resizeObserver = null;
 let suppressSelectionMenuUntil = 0;
@@ -78,6 +82,8 @@ function bindEvents() {
   document.addEventListener("mouseup", handleSelection, true);
   document.addEventListener("selectionchange", scheduleSelectionMenu);
   document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+  document.addEventListener("pointerup", finishTextSelectionInteraction, true);
+  document.addEventListener("pointercancel", finishTextSelectionInteraction, true);
   document.addEventListener("mousedown", handleDocumentMouseDown, true);
   document.addEventListener("click", handleDocumentClick, true);
   document.addEventListener("keydown", handleKeydown, true);
@@ -85,6 +91,7 @@ function bindEvents() {
   document.addEventListener("focusout", handleEditableFocusOut, true);
   document.addEventListener("visibilitychange", ensureOverlayNodesConnected);
   window.addEventListener("focus", ensureOverlayNodesConnected);
+  window.addEventListener("blur", finishTextSelectionInteraction);
   window.addEventListener("resize", () => { scheduleDynamicRender("window resize"); updateMinimapViewport(); });
   document.addEventListener("load", handleResourceLoad, true);
   document.addEventListener("scroll", handleDocumentScroll, true);
@@ -163,7 +170,7 @@ function handleResourceLoad(event) {
 
 function scheduleDynamicRender(reason) {
   clearTimeout(dynamicRenderTimer);
-  if (isEditableTarget(document.activeElement)) {
+  if (isTextSelectionInProgress || isEditableTarget(document.activeElement)) {
     dynamicRenderDeferred = true;
     return;
   }
@@ -184,7 +191,7 @@ function handleDocumentScroll() {
   scrollRenderTimer = setTimeout(() => {
     scrollRenderTimer = null;
     isScrolling = false;
-    if (isEditableTarget(document.activeElement)) {
+    if (isTextSelectionInProgress || isEditableTarget(document.activeElement)) {
       dynamicRenderDeferred = true;
       showScrollableOverlayAfterScroll();
       return;
@@ -196,15 +203,11 @@ function handleDocumentScroll() {
 }
 
 function hideScrollableOverlayDuringScroll() {
-  if (!highlightLayer) return;
-  highlightLayer.style.setProperty("visibility", "hidden", "important");
-  highlightLayer.style.setProperty("pointer-events", "none", "important");
+  updateTextHighlightVisibility();
 }
 
 function showScrollableOverlayAfterScroll() {
-  if (!highlightLayer || isScrolling) return;
-  highlightLayer.style.removeProperty("visibility");
-  highlightLayer.style.removeProperty("pointer-events");
+  updateTextHighlightVisibility();
 }
 
 function isExternalMutation(record) {
@@ -405,6 +408,7 @@ function requestRemoteData() {
 }
 
 function handleSelection(event) {
+  finishTextSelectionInteraction();
   clearTimeout(selectionChangeTimer);
   if (isEditableTarget(event?.target) || isEditableTarget(document.activeElement)) {
     hideSelectionMenu();
@@ -419,6 +423,7 @@ function handleSelection(event) {
 }
 
 function scheduleSelectionMenu() {
+  if (isTextSelectionInProgress) return;
   clearTimeout(selectionChangeTimer);
   if (isEditableTarget(document.activeElement)) {
     hideSelectionMenu();
@@ -506,7 +511,7 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
   const anchor = (resolvedSelection._range && Number.isInteger(resolvedSelection.start))
     ? createTextAnchor(resolvedSelection._range, resolvedSelection, resolvedSelection.text)
     : null;
-  pageData.highlights.push({
+  const annotation = {
     id: createId(),
     type: type === "underline" ? "underline" : "highlight",
     color,
@@ -516,12 +521,12 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
     anchor,
     visualAnchor: resolvedSelection.visualAnchor,
     createdAt: Date.now()
-  });
+  };
+  pageData.highlights.push(annotation);
   recordRecentColor(color);
   if (!options.preserveSelection) clearSelection();
   hideSelectionMenu();
-  const minimapCandidates = renderTextAnnotations();
-  renderMinimap(minimapCandidates);
+  appendTextAnnotation(annotation, resolvedSelection._range);
   queueSave();
 }
 
@@ -689,8 +694,48 @@ function handleDocumentMouseDown(event) {
 }
 
 function handleDocumentPointerDown(event) {
-  if (selectionMenu.hidden || selectionMenu.contains(event.target)) return;
-  dismissSelectionMenu();
+  if (selectionMenu.contains(event.target)) return;
+  if (!selectionMenu.hidden) dismissSelectionMenu();
+  if (event.button !== 0 || !isTextMode() || isWhlNode(event.target) || isEditableTarget(event.target)) return;
+  isTextSelectionInProgress = true;
+  clearTimeout(selectionChangeTimer);
+  suspendTextHighlights();
+}
+
+function finishTextSelectionInteraction() {
+  if (!isTextSelectionInProgress && !textHighlightsSuspended) return;
+  isTextSelectionInProgress = false;
+  resumeTextHighlights();
+  if (!dynamicRenderDeferred || isEditableTarget(document.activeElement)) return;
+  dynamicRenderDeferred = false;
+  scheduleDynamicRender("selection end");
+}
+
+function suspendTextHighlights() {
+  if (textHighlightsSuspended) return;
+  textHighlightsSuspended = true;
+  for (const name of nativeHighlightNames) globalThis.CSS?.highlights?.delete(name);
+  updateTextHighlightVisibility();
+}
+
+function resumeTextHighlights() {
+  if (!textHighlightsSuspended) return;
+  textHighlightsSuspended = false;
+  for (const group of nativeHighlightGroups.values()) {
+    globalThis.CSS?.highlights?.set(group.name, group.nativeHighlight);
+  }
+  updateTextHighlightVisibility();
+}
+
+function updateTextHighlightVisibility() {
+  if (!highlightLayer) return;
+  if (isScrolling || textHighlightsSuspended) {
+    highlightLayer.style.setProperty("visibility", "hidden", "important");
+    highlightLayer.style.setProperty("pointer-events", "none", "important");
+    return;
+  }
+  highlightLayer.style.removeProperty("visibility");
+  highlightLayer.style.removeProperty("pointer-events");
 }
 
 function renderSelectionMenu(rect, type) {
@@ -1006,6 +1051,7 @@ function selectMinimapGroup(candidates) {
 
 function renderMinimap(candidates) {
   if (!minimapEl) return;
+  minimapCandidatesCache = candidates;
   for (const element of minimapEl.querySelectorAll(".whl-minimap-dot")) element.remove();
   const selected = selectMinimapGroup(candidates);
   minimapScrollContainer = selected.scroller;
@@ -1016,15 +1062,32 @@ function renderMinimap(candidates) {
   const { scrollHeight } = minimapScrollMetrics();
   const fragment = document.createDocumentFragment();
   for (const dot of minimapDots) {
-    const el = document.createElement("div");
-    const topRatio = Math.max(0, Math.min(1, dot.top / scrollHeight));
-    el.className = "whl-minimap-dot";
-    el.style.cssText = `top: ${topRatio * 100}% !important; background: ${dot.color} !important;`;
-    el.dataset.whlDotId = dot.id;
-    fragment.appendChild(el);
+    fragment.appendChild(createMinimapDot(dot, scrollHeight));
   }
   minimapEl.appendChild(fragment);
   updateMinimapViewport();
+}
+
+function appendMinimapCandidate(candidate) {
+  if (!candidate) return;
+  minimapCandidatesCache.push(candidate);
+  if (!minimapScrollContainer || candidate.scroller !== minimapScrollContainer) {
+    renderMinimap(minimapCandidatesCache);
+    return;
+  }
+  minimapDots.push(candidate);
+  const { scrollHeight } = minimapScrollMetrics();
+  minimapEl.appendChild(createMinimapDot(candidate, scrollHeight));
+  updateMinimapViewport();
+}
+
+function createMinimapDot(dot, scrollHeight) {
+  const element = document.createElement("div");
+  const topRatio = Math.max(0, Math.min(1, dot.top / scrollHeight));
+  element.className = "whl-minimap-dot";
+  element.style.cssText = `top: ${topRatio * 100}% !important; background: ${dot.color} !important;`;
+  element.dataset.whlDotId = dot.id;
+  return element;
 }
 
 function updateMinimapViewport() {
@@ -1068,45 +1131,70 @@ function renderTextAnnotations() {
   const useNativeHighlights = supportsNativeHighlights();
   const textIndex = getTextIndex();
   for (const highlight of pageData.highlights) {
-    const range = annotationToRange(highlight, textIndex);
-    const rectResult = annotationRects(highlight, range);
-    if (!rectResult.rects.length) continue;
-    minimapCandidates.push(createMinimapCandidate(highlight, range, rectResult.rects[0]));
-    let nativeRange = null;
-    if (useNativeHighlights) {
-      if (range) {
-        nativeRange = range;
-      } else if (rectResult.usedVisualAnchor) {
-        nativeRange = buildKatexNativeRange(highlight.visualAnchor);
-      }
-    }
-    if (nativeRange) {
-      collectNativeTextAnnotation(highlight, nativeRange, nativeGroups);
-    }
-    for (const rect of rectResult.rects) {
-      const hitbox = createTextAnnotationHitbox(highlight, rect);
-      textAnnotationHitboxes.push(hitbox);
-      if (nativeRange) continue;
-      const node = document.createElement("div");
-      const typeClass = annotationType(highlight) === "underline" ? "whl-underline" : "whl-highlight";
-      const isVisualFallback = rectResult.usedVisualAnchor;
-      node.className = `whl-text-mark ${typeClass}${isVisualFallback ? " whl-visual-anchor" : ""}`;
-      node.dataset.whlId = highlight.id;
-      node.title = "点击打开操作菜单";
-      node.style.setProperty("--whl-color", highlight.color || DEFAULT_STATE.highlightColor);
-      node.style.setProperty("--whl-bg", hexToRgba(highlight.color || DEFAULT_STATE.highlightColor, 0.45));
-      node.style.setProperty("--whl-visual-bg", hexToRgba(highlight.color || DEFAULT_STATE.highlightColor, 0.22));
-      node.style.left = `${rect.left + window.scrollX}px`;
-      node.style.top = `${rect.top + window.scrollY}px`;
-      node.style.width = `${rect.width}px`;
-      node.style.height = `${rect.height}px`;
-      hitbox.mark = node;
-      fragment.appendChild(node);
-    }
+    renderTextAnnotation(highlight, annotationToRange(highlight, textIndex), {
+      fragment,
+      minimapCandidates,
+      nativeGroups,
+      useNativeHighlights
+    });
   }
   nativeHighlightStyle.textContent = renderNativeTextAnnotationGroups(nativeGroups).join("\n");
   highlightLayer.appendChild(fragment);
   return minimapCandidates;
+}
+
+function appendTextAnnotation(annotation, range) {
+  const fragment = document.createDocumentFragment();
+  const minimapCandidates = [];
+  renderTextAnnotation(annotation, range, {
+    fragment,
+    minimapCandidates,
+    nativeGroups: null,
+    useNativeHighlights: supportsNativeHighlights()
+  });
+  highlightLayer.appendChild(fragment);
+  appendMinimapCandidate(minimapCandidates[0]);
+}
+
+function renderTextAnnotation(annotation, range, context) {
+  const rectResult = annotationRects(annotation, range);
+  if (!rectResult.rects.length) return;
+  context.minimapCandidates.push(createMinimapCandidate(annotation, range, rectResult.rects[0]));
+  const nativeRange = resolveNativeRange(annotation, range, rectResult, context.useNativeHighlights);
+  if (nativeRange) {
+    if (context.nativeGroups) collectNativeTextAnnotation(annotation, nativeRange, context.nativeGroups);
+    else appendNativeTextAnnotation(annotation, nativeRange);
+  }
+  for (const rect of rectResult.rects) {
+    const hitbox = createTextAnnotationHitbox(annotation, rect);
+    textAnnotationHitboxes.push(hitbox);
+    if (nativeRange) continue;
+    const node = createTextAnnotationMark(annotation, rect, rectResult.usedVisualAnchor);
+    hitbox.mark = node;
+    context.fragment.appendChild(node);
+  }
+}
+
+function resolveNativeRange(annotation, range, rectResult, useNativeHighlights) {
+  if (!useNativeHighlights) return null;
+  if (range) return range;
+  return rectResult.usedVisualAnchor ? buildKatexNativeRange(annotation.visualAnchor) : null;
+}
+
+function createTextAnnotationMark(annotation, rect, isVisualFallback) {
+  const node = document.createElement("div");
+  const typeClass = annotationType(annotation) === "underline" ? "whl-underline" : "whl-highlight";
+  node.className = `whl-text-mark ${typeClass}${isVisualFallback ? " whl-visual-anchor" : ""}`;
+  node.dataset.whlId = annotation.id;
+  node.title = "点击打开操作菜单";
+  node.style.setProperty("--whl-color", annotation.color || DEFAULT_STATE.highlightColor);
+  node.style.setProperty("--whl-bg", hexToRgba(annotation.color || DEFAULT_STATE.highlightColor, 0.45));
+  node.style.setProperty("--whl-visual-bg", hexToRgba(annotation.color || DEFAULT_STATE.highlightColor, 0.22));
+  node.style.left = `${rect.left + window.scrollX}px`;
+  node.style.top = `${rect.top + window.scrollY}px`;
+  node.style.width = `${rect.width}px`;
+  node.style.height = `${rect.height}px`;
+  return node;
 }
 
 function createTextAnnotationHitbox(annotation, rect) {
@@ -1219,16 +1307,40 @@ function collectNativeTextAnnotation(annotation, range, groups) {
 
 function renderNativeTextAnnotationGroups(groups) {
   const rules = [];
-  for (const group of groups.values()) {
-    CSS.highlights.set(group.name, new Highlight(...group.ranges));
+  nativeHighlightGroups = new Map();
+  for (const [key, group] of groups) {
+    const nativeHighlight = new Highlight(...group.ranges);
+    if (!textHighlightsSuspended) CSS.highlights.set(group.name, nativeHighlight);
     nativeHighlightNames.push(group.name);
-    if (group.type === "underline") {
-      rules.push(`::highlight(${group.name}) { text-decoration: underline 3px ${group.color}; text-underline-offset: 0.16em; }`);
-    } else {
-      rules.push(`::highlight(${group.name}) { background-color: ${hexToRgba(group.color, 0.55)}; color: inherit; }`);
-    }
+    nativeHighlightGroups.set(key, { ...group, nativeHighlight });
+    rules.push(nativeHighlightRule(group));
   }
   return rules;
+}
+
+function appendNativeTextAnnotation(annotation, range) {
+  const type = annotationType(annotation);
+  const color = annotation.color || DEFAULT_STATE.highlightColor;
+  const key = `${type}:${color}`;
+  const existing = nativeHighlightGroups.get(key);
+  if (existing) {
+    existing.nativeHighlight.add(range);
+    existing.ranges.push(range);
+    return;
+  }
+  const group = { name: nativeHighlightGroupName(type, color), type, color, ranges: [range] };
+  const nativeHighlight = new Highlight(range);
+  if (!textHighlightsSuspended) CSS.highlights.set(group.name, nativeHighlight);
+  nativeHighlightNames.push(group.name);
+  nativeHighlightGroups.set(key, { ...group, nativeHighlight });
+  nativeHighlightStyle.textContent += `${nativeHighlightStyle.textContent ? "\n" : ""}${nativeHighlightRule(group)}`;
+}
+
+function nativeHighlightRule(group) {
+  if (group.type === "underline") {
+    return `::highlight(${group.name}) { text-decoration: underline 3px ${group.color}; text-underline-offset: 0.16em; }`;
+  }
+  return `::highlight(${group.name}) { background-color: ${hexToRgba(group.color, 0.55)}; color: inherit; }`;
 }
 
 function clearNativeTextHighlights() {
@@ -1236,6 +1348,7 @@ function clearNativeTextHighlights() {
     globalThis.CSS?.highlights?.delete(name);
   }
   nativeHighlightNames = [];
+  nativeHighlightGroups = new Map();
   if (nativeHighlightStyle) nativeHighlightStyle.textContent = "";
 }
 
