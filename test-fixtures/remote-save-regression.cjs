@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 
 const source = fs.readFileSync("src/background/service_worker.js", "utf8");
 const constants = source.match(/const DEFAULT_DAV_URL[\s\S]*?const PAGE_STORAGE_PREFIX[^;]+;/)?.[0];
-const schedule = source.match(/async function scheduleRemoteSave\(pageUrl\) \{[\s\S]*?\n\}/)?.[0];
+const schedule = source.match(/async function scheduleRemoteSave\(pageUrl, payload\) \{[\s\S]*?\n\}/)?.[0];
 const load = source.match(/async function loadLocalPageData\(pageUrl\) \{[\s\S]*?\n\}/)?.[0];
 
 assert.ok(constants, "background constants should exist");
@@ -47,6 +47,12 @@ async function createContext(config) {
   assert.equal(enabled.calls[0][0], "get");
   assert.equal(enabled.calls[1][0], "status");
   assert.equal(enabled.calls[2][0], "save");
+
+  const cleared = await createContext({ enabled: true });
+  const emptyPayload = { highlights: [], strokes: [] };
+  await cleared.scheduleRemoteSave("https://example.com/", emptyPayload);
+  assert.equal(cleared.calls[0][0], "status");
+  assert.equal(cleared.calls[0][5], emptyPayload);
 
   console.log("remote save regression passed");
 })().catch((error) => {

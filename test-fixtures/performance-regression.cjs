@@ -32,6 +32,6 @@ assert.equal(context.compactMinimapDots(denseDots.slice(0, 100), 10000).length, 
 assert.match(contentSource, /if \(isViewportScrollTarget\(event\?\.target\)\) return;/);
 assert.match(contentSource, /debugLog\("menu rendered", \(\) => \(\{/);
 assert.doesNotMatch(contentSource, /estimateJsonSize/);
-assert.match(contentSource, /WHL_SAVE_REMOTE", url: location\.href \}/);
+assert.match(contentSource, /payload = isEmptyPageData\(pageData\) \? pageData : undefined/);
 
 console.log("performance regression passed");

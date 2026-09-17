@@ -1986,7 +1986,8 @@ function queueSave() {
 
 async function saveNow() {
   await saveLocalOnly();
-  chrome.runtime.sendMessage({ type: "WHL_SAVE_REMOTE", url: location.href });
+  const payload = isEmptyPageData(pageData) ? pageData : undefined;
+  chrome.runtime.sendMessage({ type: "WHL_SAVE_REMOTE", url: location.href, payload });
 }
 
 async function saveLocalOnly() {

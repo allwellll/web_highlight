@@ -26,7 +26,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "WHL_SAVE_REMOTE") {
-    scheduleRemoteSave(message.url).then(sendResponse);
+    scheduleRemoteSave(message.url, message.payload).then(sendResponse);
     return true;
   }
 
@@ -81,17 +81,17 @@ async function loadRemoteAnnotations(pageUrl) {
   }
 }
 
-async function scheduleRemoteSave(pageUrl) {
+async function scheduleRemoteSave(pageUrl, payload) {
   const config = await getSyncConfig();
   if (!isConfigReady(config)) {
     return { ok: false, skipped: true, reason: "sync-disabled" };
   }
 
-  const payload = await loadLocalPageData(pageUrl);
-  if (!payload) return { ok: false, skipped: true, reason: "local-empty" };
+  const resolvedPayload = payload || await loadLocalPageData(pageUrl);
+  if (!resolvedPayload) return { ok: false, skipped: true, reason: "local-empty" };
 
-  await updateSyncStatus(pageUrl, "save", "queued", "queued", payload);
-  saveRemoteAnnotations(config, pageUrl, payload);
+  await updateSyncStatus(pageUrl, "save", "queued", "queued", resolvedPayload);
+  saveRemoteAnnotations(config, pageUrl, resolvedPayload);
   return { ok: true, queued: true };
 }
 
