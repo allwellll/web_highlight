@@ -10,8 +10,10 @@ const PEN_MAX_POINTS = 3000;
 const ANCHOR_CONTEXT_CHARS = 80;
 const MAX_TEXT_CANDIDATES = 80;
 const MIN_ANCHOR_SCORE = 64;
+const MINIMAP_MAX_RENDERED_DOTS = 300;
 const STATE_VERSION = 2;
 const DYNAMIC_RENDER_DELAY = 300;
+const DYNAMIC_RENDER_IDLE_TIMEOUT = 1000;
 const SCROLL_RENDER_DELAY = 500;
 const RESIZE_RENDER_SUPPRESSION_MS = 100;
 const DEBUG_HOSTS = ["ns01.plusai.io"];
@@ -43,6 +45,7 @@ let minimapEl = null;
 let minimapViewport = null;
 let minimapStyle = null;
 let minimapDots = [];
+let minimapRenderedBuckets = new Set();
 let minimapCandidatesCache = [];
 let minimapScrollContainer = null;
 let pendingSelection = null;
@@ -51,12 +54,14 @@ let currentPath = null;
 let saveTimer = null;
 let selectionChangeTimer = null;
 let dynamicRenderTimer = null;
+let dynamicRenderIdleHandle = null;
 let scrollRenderTimer = null;
 let dynamicRenderDeferred = false;
 let suppressResizeRenderUntil = 0;
 let isScrolling = false;
 let isTextSelectionInProgress = false;
 let textHighlightsSuspended = false;
+let textHighlightResumeFrame = null;
 let mutationObserver = null;
 let resizeObserver = null;
 let suppressSelectionMenuUntil = 0;
@@ -170,6 +175,7 @@ function handleResourceLoad(event) {
 
 function scheduleDynamicRender(reason) {
   clearTimeout(dynamicRenderTimer);
+  cancelDynamicRenderIdle();
   if (isTextSelectionInProgress || isEditableTarget(document.activeElement)) {
     dynamicRenderDeferred = true;
     return;
@@ -177,14 +183,38 @@ function scheduleDynamicRender(reason) {
   dynamicRenderDeferred = false;
   dynamicRenderTimer = setTimeout(() => {
     dynamicRenderTimer = null;
-    debugLog("dynamic render", { reason });
-    scheduleRenderAll();
+    scheduleDynamicRenderWhenIdle(reason);
   }, DYNAMIC_RENDER_DELAY);
 }
 
-function handleDocumentScroll() {
+function scheduleDynamicRenderWhenIdle(reason) {
+  const render = () => {
+    dynamicRenderIdleHandle = null;
+    if (isTextSelectionInProgress || isEditableTarget(document.activeElement)) {
+      dynamicRenderDeferred = true;
+      return;
+    }
+    debugLog("dynamic render", { reason });
+    scheduleRenderAll();
+  };
+  if (globalThis.requestIdleCallback) {
+    dynamicRenderIdleHandle = requestIdleCallback(render, { timeout: DYNAMIC_RENDER_IDLE_TIMEOUT });
+    return;
+  }
+  dynamicRenderIdleHandle = setTimeout(render, 0);
+}
+
+function cancelDynamicRenderIdle() {
+  if (dynamicRenderIdleHandle === null) return;
+  if (globalThis.cancelIdleCallback) cancelIdleCallback(dynamicRenderIdleHandle);
+  else clearTimeout(dynamicRenderIdleHandle);
+  dynamicRenderIdleHandle = null;
+}
+
+function handleDocumentScroll(event) {
   updateMinimapViewport();
   if (!pageData.highlights.length && !pageData.strokes.length) return;
+  if (isViewportScrollTarget(event?.target)) return;
   isScrolling = true;
   hideScrollableOverlayDuringScroll();
   clearTimeout(scrollRenderTimer);
@@ -200,6 +230,14 @@ function handleDocumentScroll() {
     scheduleRenderAll();
     showScrollableOverlayAfterScroll();
   }, SCROLL_RENDER_DELAY);
+}
+
+function isViewportScrollTarget(target) {
+  return target === document
+    || target === window
+    || target === document.body
+    || target === document.documentElement
+    || target === document.scrollingElement;
 }
 
 function hideScrollableOverlayDuringScroll() {
@@ -368,7 +406,7 @@ function ensureOverlayNodesConnected() {
   for (const node of nodes) {
     if (node.isConnected && node.ownerDocument === document) continue;
     root.appendChild(node);
-    debugLog("overlay node reattached", { node: debugNode(node), root: debugNode(root) });
+    debugLog("overlay node reattached", () => ({ node: debugNode(node), root: debugNode(root) }));
   }
 }
 
@@ -415,10 +453,10 @@ function handleSelection(event) {
     return;
   }
   if (event?.target && (selectionMenu.contains(event.target) || annotationMenu.contains(event.target))) {
-    debugLog("selection ignored: menu target", debugEventTarget(event.target));
+    debugLog("selection ignored: menu target", () => debugEventTarget(event.target));
     return;
   }
-  debugLog("mouseup selection check", { mode: state.mode, target: debugEventTarget(event?.target) });
+  debugLog("mouseup selection check", () => ({ mode: state.mode, target: debugEventTarget(event?.target) }));
   showSelectionMenuFromCurrentSelection("mouseup");
 }
 
@@ -473,11 +511,11 @@ function getCurrentSelectionData(source = "unknown") {
     return null;
   }
   if (selection.rangeCount === 0) {
-    debugLog("selection skipped: no range", { source, ...debugSelectionSnapshot(selection) });
+    debugLog("selection skipped: no range", () => ({ source, ...debugSelectionSnapshot(selection) }));
     return null;
   }
   if (selection.isCollapsed) {
-    debugLog("selection skipped: collapsed", { source, ...debugSelectionSnapshot(selection) });
+    debugLog("selection skipped: collapsed", () => ({ source, ...debugSelectionSnapshot(selection) }));
     hideSelectionMenuIfSafe();
     return null;
   }
@@ -487,12 +525,12 @@ function getCurrentSelectionData(source = "unknown") {
     return null;
   }
   if (!document.body.contains(range.commonAncestorContainer)) {
-    debugLog("selection skipped: outside body", {
+    debugLog("selection skipped: outside body", () => ({
       source,
       commonAncestor: debugNode(range.commonAncestorContainer),
       start: debugNode(range.startContainer),
       end: debugNode(range.endContainer)
-    });
+    }));
     return null;
   }
 
@@ -705,17 +743,29 @@ function handleDocumentPointerDown(event) {
 function finishTextSelectionInteraction() {
   if (!isTextSelectionInProgress && !textHighlightsSuspended) return;
   isTextSelectionInProgress = false;
-  resumeTextHighlights();
+  scheduleTextHighlightsResume();
   if (!dynamicRenderDeferred || isEditableTarget(document.activeElement)) return;
   dynamicRenderDeferred = false;
   scheduleDynamicRender("selection end");
 }
 
 function suspendTextHighlights() {
+  if (textHighlightResumeFrame !== null) {
+    cancelAnimationFrame(textHighlightResumeFrame);
+    textHighlightResumeFrame = null;
+  }
   if (textHighlightsSuspended) return;
   textHighlightsSuspended = true;
   for (const name of nativeHighlightNames) globalThis.CSS?.highlights?.delete(name);
   updateTextHighlightVisibility();
+}
+
+function scheduleTextHighlightsResume() {
+  if (!textHighlightsSuspended || textHighlightResumeFrame !== null) return;
+  textHighlightResumeFrame = requestAnimationFrame(() => {
+    textHighlightResumeFrame = null;
+    resumeTextHighlights();
+  });
 }
 
 function resumeTextHighlights() {
@@ -819,7 +869,7 @@ function renderSelectionMenu(rect, type) {
   selectionMenu.hidden = false;
   applySelectionMenuCriticalStyle();
   positionFloatingMenu(selectionMenu, rect);
-  debugLog("menu rendered", {
+  debugLog("menu rendered", () => ({
     type,
     colorCount: colors.length,
     childCount: selectionMenu.children.length,
@@ -828,7 +878,7 @@ function renderSelectionMenu(rect, type) {
     position: { left: selectionMenu.style.left, top: selectionMenu.style.top },
     computed: debugComputedStyle(selectionMenu),
     firstButton: debugMenuChild(selectionMenu.firstElementChild)
-  });
+  }));
 }
 
 function applySelectionMenuCriticalStyle() {
@@ -1053,6 +1103,7 @@ function renderMinimap(candidates) {
   if (!minimapEl) return;
   minimapCandidatesCache = candidates;
   for (const element of minimapEl.querySelectorAll(".whl-minimap-dot")) element.remove();
+  minimapRenderedBuckets = new Set();
   const selected = selectMinimapGroup(candidates);
   minimapScrollContainer = selected.scroller;
   minimapDots = selected.dots.sort((a, b) => a.top - b.top);
@@ -1061,7 +1112,9 @@ function renderMinimap(candidates) {
   if (!hasContent) return;
   const { scrollHeight } = minimapScrollMetrics();
   const fragment = document.createDocumentFragment();
-  for (const dot of minimapDots) {
+  const renderedDots = compactMinimapDots(minimapDots, scrollHeight);
+  for (const dot of renderedDots) {
+    if (Number.isInteger(dot.minimapBucket)) minimapRenderedBuckets.add(dot.minimapBucket);
     fragment.appendChild(createMinimapDot(dot, scrollHeight));
   }
   minimapEl.appendChild(fragment);
@@ -1077,8 +1130,44 @@ function appendMinimapCandidate(candidate) {
   }
   minimapDots.push(candidate);
   const { scrollHeight } = minimapScrollMetrics();
+  if (minimapDots.length === MINIMAP_MAX_RENDERED_DOTS + 1) {
+    renderMinimap(minimapCandidatesCache);
+    return;
+  }
+  if (minimapDots.length > MINIMAP_MAX_RENDERED_DOTS) {
+    const compacted = compactMinimapDot(candidate, scrollHeight);
+    if (minimapRenderedBuckets.has(compacted.minimapBucket)) {
+      updateMinimapViewport();
+      return;
+    }
+    minimapRenderedBuckets.add(compacted.minimapBucket);
+    minimapEl.appendChild(createMinimapDot(compacted, scrollHeight));
+    updateMinimapViewport();
+    return;
+  }
   minimapEl.appendChild(createMinimapDot(candidate, scrollHeight));
   updateMinimapViewport();
+}
+
+function compactMinimapDots(dots, scrollHeight) {
+  if (dots.length <= MINIMAP_MAX_RENDERED_DOTS) return dots;
+  const buckets = new Map();
+  for (const dot of dots) {
+    const compacted = compactMinimapDot(dot, scrollHeight);
+    if (!buckets.has(compacted.minimapBucket)) buckets.set(compacted.minimapBucket, compacted);
+  }
+  return [...buckets.values()];
+}
+
+function compactMinimapDot(dot, scrollHeight) {
+  const safeHeight = Math.max(1, scrollHeight);
+  const ratio = Math.max(0, Math.min(1, dot.top / safeHeight));
+  const minimapBucket = Math.min(MINIMAP_MAX_RENDERED_DOTS - 1, Math.floor(ratio * MINIMAP_MAX_RENDERED_DOTS));
+  return {
+    ...dot,
+    top: ((minimapBucket + 0.5) / MINIMAP_MAX_RENDERED_DOTS) * safeHeight,
+    minimapBucket
+  };
 }
 
 function createMinimapDot(dot, scrollHeight) {
@@ -1897,7 +1986,7 @@ function queueSave() {
 
 async function saveNow() {
   await saveLocalOnly();
-  chrome.runtime.sendMessage({ type: "WHL_SAVE_REMOTE", url: location.href, payload: pageData });
+  chrome.runtime.sendMessage({ type: "WHL_SAVE_REMOTE", url: location.href });
 }
 
 async function saveLocalOnly() {
@@ -1916,8 +2005,7 @@ async function updateLocalIndex() {
   const index = normalizeStorageIndex(stored[STORAGE_INDEX_KEY]);
   index.pages[key] = {
     url: location.href,
-    updatedAt: pageData.updatedAt || Date.now(),
-    size: estimateJsonSize(pageData)
+    updatedAt: pageData.updatedAt || Date.now()
   };
   await chrome.storage.local.set({ [STORAGE_INDEX_KEY]: index });
 }
@@ -1961,17 +2049,12 @@ async function migrateLocalIndex(index) {
     if (!key.startsWith(STORAGE_PREFIX) || index.pages[key]) continue;
     index.pages[key] = {
       url: value?.url || key.slice(STORAGE_PREFIX.length),
-      updatedAt: value?.updatedAt || Date.now(),
-      size: estimateJsonSize(value || {})
+      updatedAt: value?.updatedAt || Date.now()
     };
   }
   index.migrated = true;
   await chrome.storage.local.set({ [STORAGE_INDEX_KEY]: index });
   return index;
-}
-
-function estimateJsonSize(value) {
-  return new Blob([JSON.stringify(value)]).size;
 }
 
 function storageKey() {
@@ -2053,7 +2136,8 @@ function hexToRgba(hex, alpha) {
 
 function debugLog(message, data = {}) {
   if (!DEBUG_ENABLED) return;
-  console.info(`[WHL][${new Date().toISOString()}] ${message}`, data);
+  const resolvedData = typeof data === "function" ? data() : data;
+  console.info(`[WHL][${new Date().toISOString()}] ${message}`, resolvedData);
 }
 
 function isDebugEnabled() {

@@ -1,5 +1,6 @@
 const DEFAULT_DAV_URL = "https://dav.jianguoyun.com/dav/web-highlight";
 const SYNC_STATUS_KEY = "whlSyncStatus";
+const PAGE_STORAGE_PREFIX = "whl:page:";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || !message.type) return false;
@@ -25,7 +26,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "WHL_SAVE_REMOTE") {
-    scheduleRemoteSave(message.url, message.payload).then(sendResponse);
+    scheduleRemoteSave(message.url).then(sendResponse);
     return true;
   }
 
@@ -80,16 +81,24 @@ async function loadRemoteAnnotations(pageUrl) {
   }
 }
 
-async function scheduleRemoteSave(pageUrl, payload) {
+async function scheduleRemoteSave(pageUrl) {
   const config = await getSyncConfig();
   if (!isConfigReady(config)) {
-    await updateSyncStatus(pageUrl, "save", "skipped", "sync-disabled", payload);
     return { ok: false, skipped: true, reason: "sync-disabled" };
   }
+
+  const payload = await loadLocalPageData(pageUrl);
+  if (!payload) return { ok: false, skipped: true, reason: "local-empty" };
 
   await updateSyncStatus(pageUrl, "save", "queued", "queued", payload);
   saveRemoteAnnotations(config, pageUrl, payload);
   return { ok: true, queued: true };
+}
+
+async function loadLocalPageData(pageUrl) {
+  const key = `${PAGE_STORAGE_PREFIX}${pageUrl}`;
+  const stored = await chrome.storage.local.get(key);
+  return stored[key] || null;
 }
 
 async function saveRemoteAnnotations(config, pageUrl, payload) {
