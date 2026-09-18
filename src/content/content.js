@@ -3,8 +3,10 @@ if (globalThis.__WHL_CONTENT_LOADED__) return;
 globalThis.__WHL_CONTENT_LOADED__ = true;
 const STORAGE_PREFIX = "whl:page:";
 const STORAGE_INDEX_KEY = "whl:index";
+const LOCAL_CLEANUP_KEY = "whl:lastCleanupAt";
 const MAX_LOCAL_PAGES = 500;
 const LOCAL_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const LOCAL_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const PEN_MIN_DISTANCE = 4;
 const PEN_MAX_POINTS = 3000;
 const ANCHOR_CONTEXT_CHARS = 80;
@@ -14,6 +16,8 @@ const MINIMAP_MAX_RENDERED_DOTS = 300;
 const STATE_VERSION = 2;
 const DYNAMIC_RENDER_DELAY = 300;
 const DYNAMIC_RENDER_IDLE_TIMEOUT = 1000;
+const SAVE_DELAY = 800;
+const SAVE_IDLE_TIMEOUT = 2000;
 const SCROLL_RENDER_DELAY = 500;
 const RESIZE_RENDER_SUPPRESSION_MS = 100;
 const DEBUG_HOSTS = ["ns01.plusai.io"];
@@ -52,6 +56,7 @@ let pendingSelection = null;
 let currentStroke = null;
 let currentPath = null;
 let saveTimer = null;
+let saveIdleHandle = null;
 let selectionChangeTimer = null;
 let dynamicRenderTimer = null;
 let dynamicRenderIdleHandle = null;
@@ -64,6 +69,7 @@ let textHighlightsSuspended = false;
 let textHighlightResumeFrame = null;
 let mutationObserver = null;
 let resizeObserver = null;
+let dynamicRenderEventsBound = false;
 let suppressSelectionMenuUntil = 0;
 let textIndexCache = null;
 let textIndexDirty = true;
@@ -74,12 +80,12 @@ init();
 async function init() {
   createLayers();
   await loadState();
-  await cleanupLocalStorage();
   await loadPageData();
   applyModeClass();
   renderAll();
   bindEvents();
-  bindDynamicRenderEvents();
+  syncDynamicRenderEvents();
+  scheduleLocalCleanup();
   requestRemoteData();
 }
 
@@ -94,9 +100,10 @@ function bindEvents() {
   document.addEventListener("keydown", handleKeydown, true);
   document.addEventListener("focusin", handleEditableFocusIn, true);
   document.addEventListener("focusout", handleEditableFocusOut, true);
-  document.addEventListener("visibilitychange", ensureOverlayNodesConnected);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("focus", ensureOverlayNodesConnected);
   window.addEventListener("blur", finishTextSelectionInteraction);
+  window.addEventListener("pagehide", flushPendingSave);
   window.addEventListener("resize", () => { scheduleDynamicRender("window resize"); updateMinimapViewport(); });
   document.addEventListener("load", handleResourceLoad, true);
   document.addEventListener("scroll", handleDocumentScroll, true);
@@ -128,6 +135,7 @@ function bindEvents() {
 
     if (message?.type === "WHL_CLEAR_PAGE") {
       pageData = emptyPageData();
+      syncDynamicRenderEvents();
       renderAll();
       queueSave();
       sendResponse({ ok: true, counts: counts() });
@@ -144,6 +152,8 @@ function bindEvents() {
 }
 
 function bindDynamicRenderEvents() {
+  if (dynamicRenderEventsBound) return;
+  dynamicRenderEventsBound = true;
   mutationObserver?.disconnect();
   mutationObserver = new MutationObserver(handleDocumentMutations);
   mutationObserver.observe(document.documentElement, {
@@ -162,6 +172,32 @@ function bindDynamicRenderEvents() {
   if (document.body) resizeObserver.observe(document.body);
 }
 
+function unbindDynamicRenderEvents() {
+  if (!dynamicRenderEventsBound) return;
+  dynamicRenderEventsBound = false;
+  mutationObserver?.disconnect();
+  resizeObserver?.disconnect();
+  mutationObserver = null;
+  resizeObserver = null;
+  clearTimeout(dynamicRenderTimer);
+  clearTimeout(scrollRenderTimer);
+  cancelDynamicRenderIdle();
+  dynamicRenderTimer = null;
+  scrollRenderTimer = null;
+  dynamicRenderDeferred = false;
+  isScrolling = false;
+  invalidateTextIndex();
+}
+
+function syncDynamicRenderEvents() {
+  if (hasPageAnnotations()) bindDynamicRenderEvents();
+  else unbindDynamicRenderEvents();
+}
+
+function hasPageAnnotations() {
+  return pageData.highlights.length > 0 || pageData.strokes.length > 0;
+}
+
 function handleDocumentMutations(records) {
   if (!records.some(isExternalMutation)) return;
   invalidateTextIndex();
@@ -174,6 +210,7 @@ function handleResourceLoad(event) {
 }
 
 function scheduleDynamicRender(reason) {
+  if (!hasPageAnnotations()) return;
   clearTimeout(dynamicRenderTimer);
   cancelDynamicRenderIdle();
   if (isTextSelectionInProgress || isEditableTarget(document.activeElement)) {
@@ -410,6 +447,11 @@ function ensureOverlayNodesConnected() {
   }
 }
 
+function handleVisibilityChange() {
+  ensureOverlayNodesConnected();
+  if (document.visibilityState === "hidden") flushPendingSave();
+}
+
 async function loadState() {
   const stored = await chrome.storage.local.get("whlState");
   state = normalizeState(stored.whlState);
@@ -440,6 +482,7 @@ function requestRemoteData() {
     if ((remoteData.updatedAt || 0) > (pageData.updatedAt || 0)) {
       pageData = remoteData;
       saveLocalOnly();
+      syncDynamicRenderEvents();
       renderAll();
     }
   });
@@ -561,6 +604,7 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
     createdAt: Date.now()
   };
   pageData.highlights.push(annotation);
+  syncDynamicRenderEvents();
   recordRecentColor(color);
   if (!options.preserveSelection) clearSelection();
   hideSelectionMenu();
@@ -674,6 +718,7 @@ function finishPenStroke(event) {
   if (currentStroke.points.length > 1) {
     currentStroke.points = simplifyPoints(currentStroke.points, PEN_MIN_DISTANCE);
     pageData.strokes.push(currentStroke);
+    syncDynamicRenderEvents();
     queueSave();
   }
   currentStroke = null;
@@ -1018,6 +1063,7 @@ function removeAnnotation(id) {
   hideAnnotationMenu();
   pageData.highlights = pageData.highlights.filter((item) => item.id !== id);
   pageData.strokes = pageData.strokes.filter((item) => item.id !== id);
+  syncDynamicRenderEvents();
   renderAll();
   queueSave();
 }
@@ -1214,6 +1260,7 @@ function renderTextAnnotations() {
   highlightLayer.textContent = "";
   textAnnotationHitboxes = [];
   clearNativeTextHighlights();
+  if (!pageData.highlights.length) return [];
   const fragment = document.createDocumentFragment();
   const minimapCandidates = [];
   const nativeGroups = new Map();
@@ -1501,11 +1548,11 @@ function rangeToOffsets(range) {
 }
 
 function createTextAnchor(range, offsets, text) {
-  const fullText = documentTextFromIndex(getTextIndex());
+  const textIndex = getTextIndex();
   return {
     version: 1,
-    prefix: fullText.slice(Math.max(0, offsets.start - ANCHOR_CONTEXT_CHARS), offsets.start),
-    suffix: fullText.slice(offsets.end, offsets.end + ANCHOR_CONTEXT_CHARS),
+    prefix: textSliceFromIndex(textIndex, Math.max(0, offsets.start - ANCHOR_CONTEXT_CHARS), offsets.start),
+    suffix: textSliceFromIndex(textIndex, offsets.end, offsets.end + ANCHOR_CONTEXT_CHARS),
     startPath: nodePath(range.startContainer),
     endPath: nodePath(range.endContainer),
     startOffset: range.startOffset,
@@ -1541,10 +1588,11 @@ function rangeFromDomAnchor(annotation) {
 
 function rangeFromTextQuote(annotation, textIndex) {
   if (!annotation.text) return null;
-  const candidates = findTextCandidates(textIndex.fullText, annotation.text);
+  const fullText = documentTextFromIndex(textIndex);
+  const candidates = findTextCandidates(fullText, annotation.text);
   let best = null;
   for (const start of candidates) {
-    const score = scoreTextCandidate(start, annotation, textIndex.fullText);
+    const score = scoreTextCandidate(start, annotation, fullText);
     if (!best || score > best.score) best = { start, score };
   }
   if (!best || best.score < MIN_ANCHOR_SCORE) return null;
@@ -1571,7 +1619,7 @@ function pointAtOffset(offset, textIndex) {
     const end = start + textIndex.nodes[mid].nodeValue.length;
     if (offset < start) high = mid - 1;
     else if (offset > end) low = mid + 1;
-    else return { node: textIndex.nodes[mid], offset: offset - start };
+    else return { node: textIndex.nodes[mid], offset: offset - start, index: mid };
   }
   return null;
 }
@@ -1580,7 +1628,6 @@ function pointAtOffset(offset, textIndex) {
 function createTextIndex() {
   const nodes = [];
   const starts = [];
-  const parts = [];
   const offsetByNode = new WeakMap();
   let position = 0;
   const walker = textWalker();
@@ -1589,10 +1636,9 @@ function createTextIndex() {
     nodes.push(walker.currentNode);
     starts.push(position);
     offsetByNode.set(walker.currentNode, position);
-    parts.push(value);
     position += value.length;
   }
-  return { nodes, starts, offsetByNode, fullText: parts.join("") };
+  return { nodes, starts, offsetByNode, fullText: null };
 }
 
 function getTextIndex() {
@@ -1617,7 +1663,24 @@ function scheduleRenderAll() {
 }
 
 function documentTextFromIndex(textIndex) {
-  return textIndex.fullText || "";
+  if (typeof textIndex.fullText === "string") return textIndex.fullText;
+  textIndex.fullText = textIndex.nodes.map((node) => node.nodeValue).join("");
+  return textIndex.fullText;
+}
+
+function textSliceFromIndex(textIndex, start, end) {
+  const point = pointAtOffset(start, textIndex);
+  if (!point || end <= start) return "";
+  const chunks = [];
+  let remaining = end - start;
+  for (let index = point.index; index < textIndex.nodes.length && remaining > 0; index += 1) {
+    const value = textIndex.nodes[index].nodeValue;
+    const offset = index === point.index ? point.offset : 0;
+    const chunk = value.slice(offset, offset + remaining);
+    chunks.push(chunk);
+    remaining -= chunk.length;
+  }
+  return chunks.join("");
 }
 
 function rangeMatchesText(range, text, allowPartial = false) {
@@ -1981,7 +2044,36 @@ function queueSave() {
   pageData.url = location.href;
   pageData.updatedAt = Date.now();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveNow, 300);
+  cancelSaveIdle();
+  saveTimer = setTimeout(scheduleSaveWhenIdle, SAVE_DELAY);
+}
+
+function scheduleSaveWhenIdle() {
+  saveTimer = null;
+  const save = () => {
+    saveIdleHandle = null;
+    void saveNow();
+  };
+  if (globalThis.requestIdleCallback) {
+    saveIdleHandle = requestIdleCallback(save, { timeout: SAVE_IDLE_TIMEOUT });
+    return;
+  }
+  saveIdleHandle = setTimeout(save, 0);
+}
+
+function cancelSaveIdle() {
+  if (saveIdleHandle === null) return;
+  if (globalThis.cancelIdleCallback) cancelIdleCallback(saveIdleHandle);
+  else clearTimeout(saveIdleHandle);
+  saveIdleHandle = null;
+}
+
+function flushPendingSave() {
+  if (saveTimer === null && saveIdleHandle === null) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  cancelSaveIdle();
+  void saveNow();
 }
 
 async function saveNow() {
@@ -2018,25 +2110,44 @@ async function removeFromLocalIndex(key) {
   await chrome.storage.local.set({ [STORAGE_INDEX_KEY]: index });
 }
 
+function scheduleLocalCleanup() {
+  const run = () => cleanupLocalStorage().catch((error) => {
+    debugLog("local cleanup failed", { message: error?.message });
+  });
+  if (globalThis.requestIdleCallback) {
+    requestIdleCallback(run, { timeout: 5000 });
+    return;
+  }
+  setTimeout(run, 1000);
+}
+
 async function cleanupLocalStorage(force = false) {
-  const stored = await chrome.storage.local.get(STORAGE_INDEX_KEY);
+  const stored = await chrome.storage.local.get([STORAGE_INDEX_KEY, LOCAL_CLEANUP_KEY]);
+  const now = Date.now();
+  const lastCleanupAt = Number(stored[LOCAL_CLEANUP_KEY]) || 0;
+  if (!force && now - lastCleanupAt < LOCAL_CLEANUP_INTERVAL_MS) {
+    const index = normalizeStorageIndex(stored[STORAGE_INDEX_KEY]);
+    return { removed: 0, remaining: Object.keys(index.pages).length, skipped: true };
+  }
   let index = normalizeStorageIndex(stored[STORAGE_INDEX_KEY]);
   if (force || !index.migrated) index = await migrateLocalIndex(index);
-  const now = Date.now();
   const entries = Object.entries(index.pages);
   const expired = entries
     .filter(([, item]) => now - (item.updatedAt || 0) > LOCAL_TTL_MS)
     .map(([key]) => key);
+  const expiredSet = new Set(expired);
   const overflow = entries
-    .filter(([key]) => !expired.includes(key))
+    .filter(([key]) => !expiredSet.has(key))
     .sort(([, left], [, right]) => (right.updatedAt || 0) - (left.updatedAt || 0))
     .slice(MAX_LOCAL_PAGES)
     .map(([key]) => key);
   const keysToRemove = [...new Set([...expired, ...overflow])];
-  if (!force && keysToRemove.length === 0) return { removed: 0, remaining: entries.length };
   if (keysToRemove.length) await chrome.storage.local.remove(keysToRemove);
   for (const key of keysToRemove) delete index.pages[key];
-  await chrome.storage.local.set({ [STORAGE_INDEX_KEY]: index });
+  await chrome.storage.local.set({
+    [STORAGE_INDEX_KEY]: index,
+    [LOCAL_CLEANUP_KEY]: now
+  });
   return { removed: keysToRemove.length, remaining: Object.keys(index.pages).length };
 }
 
@@ -2054,7 +2165,6 @@ async function migrateLocalIndex(index) {
     };
   }
   index.migrated = true;
-  await chrome.storage.local.set({ [STORAGE_INDEX_KEY]: index });
   return index;
 }
 

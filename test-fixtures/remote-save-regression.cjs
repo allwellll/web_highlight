@@ -1,58 +1,120 @@
 const fs = require("node:fs");
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
+const { webcrypto } = require("node:crypto");
 
 const source = fs.readFileSync("src/background/service_worker.js", "utf8");
-const constants = source.match(/const DEFAULT_DAV_URL[\s\S]*?const PAGE_STORAGE_PREFIX[^;]+;/)?.[0];
-const schedule = source.match(/async function scheduleRemoteSave\(pageUrl, payload\) \{[\s\S]*?\n\}/)?.[0];
-const load = source.match(/async function loadLocalPageData\(pageUrl\) \{[\s\S]*?\n\}/)?.[0];
 
-assert.ok(constants, "background constants should exist");
-assert.ok(schedule, "scheduleRemoteSave should exist");
-assert.ok(load, "loadLocalPageData should exist");
-
-async function createContext(config) {
-  const calls = [];
+function createContext({ enabled = true, pageData = null } = {}) {
+  const pageUrl = "https://example.com/";
+  const store = {
+    whlSyncConfig: {
+      davUrl: "https://dav.example.com/web-highlight",
+      username: "user",
+      password: "password",
+      enabled
+    },
+    ...(pageData ? { [`whl:page:${pageUrl}`]: pageData } : {})
+  };
+  const fetchCalls = [];
+  const timers = new Map();
+  let nextTimer = 0;
   const context = {
-    calls,
+    Buffer,
+    TextEncoder,
+    Uint8Array,
+    crypto: webcrypto,
+    console,
+    Promise,
+    Map,
+    Date,
+    setTimeout(callback) {
+      const id = ++nextTimer;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    btoa(value) {
+      return Buffer.from(value).toString("base64");
+    },
+    fetch: async (url, options = {}) => {
+      fetchCalls.push({ url, options });
+      if (options.method === "MKCOL") return { ok: false, status: 405 };
+      return { ok: true, status: 200, async json() { return null; } };
+    },
     chrome: {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage() { return Promise.resolve(); }
+      },
       storage: {
         local: {
-          async get(key) {
-            calls.push(["get", key]);
-            return { [`whl:page:https://example.com/`]: { highlights: [{ type: "highlight" }], strokes: [] } };
+          async get(keys) {
+            if (keys === null || keys === undefined) return { ...store };
+            if (typeof keys === "string") return { [keys]: store[keys] };
+            if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, store[key]]));
+            return {};
+          },
+          async set(values) {
+            Object.assign(store, values);
+          },
+          async remove(keys) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) delete store[key];
           }
         }
       }
-    },
-    async getSyncConfig() { return config; },
-    isConfigReady(value) { return Boolean(value.enabled); },
-    async updateSyncStatus(...args) { calls.push(["status", ...args]); },
-    async saveRemoteAnnotations(...args) { calls.push(["save", ...args]); }
+    }
   };
   vm.createContext(context);
-  vm.runInContext(`${constants}\n${schedule}\n${load}\nthis.scheduleRemoteSave = scheduleRemoteSave;`, context);
-  return context;
+  vm.runInContext(source, context);
+  return {
+    context,
+    fetchCalls,
+    store,
+    timers,
+    async schedule(payload) {
+      context.__payload = payload;
+      return vm.runInContext(`scheduleRemoteSave(${JSON.stringify(pageUrl)}, __payload)`, context);
+    },
+    async flushNext() {
+      const [id, callback] = timers.entries().next().value || [];
+      assert.ok(id, "a remote save timer should be pending");
+      timers.delete(id);
+      await callback();
+    }
+  };
 }
 
 (async () => {
-  const disabled = await createContext({ enabled: false });
-  const skipped = await disabled.scheduleRemoteSave("https://example.com/");
+  const disabled = createContext({ enabled: false, pageData: { highlights: [], strokes: [] } });
+  const skipped = await disabled.schedule();
   assert.equal(skipped.reason, "sync-disabled");
-  assert.equal(disabled.calls.length, 0);
+  assert.equal(disabled.timers.size, 0);
+  assert.equal(disabled.fetchCalls.length, 0);
+  assert.equal(disabled.store.whlSyncStatus, undefined);
 
-  const enabled = await createContext({ enabled: true });
-  const queued = await enabled.scheduleRemoteSave("https://example.com/");
-  assert.equal(queued.queued, true);
-  assert.equal(enabled.calls[0][0], "get");
-  assert.equal(enabled.calls[1][0], "status");
-  assert.equal(enabled.calls[2][0], "save");
+  const firstPayload = { highlights: [{ id: "first", type: "highlight" }], strokes: [] };
+  const latestPayload = { highlights: [{ id: "latest", type: "highlight" }], strokes: [] };
+  const enabled = createContext({ pageData: firstPayload });
+  await enabled.schedule(firstPayload);
+  await enabled.schedule(latestPayload);
+  assert.equal(enabled.timers.size, 1);
+  await enabled.flushNext();
 
-  const cleared = await createContext({ enabled: true });
+  assert.equal(enabled.fetchCalls.filter((call) => call.options.method === "MKCOL").length, 1);
+  const firstPuts = enabled.fetchCalls.filter((call) => call.options.method === "PUT");
+  assert.equal(firstPuts.length, 1);
+  assert.equal(JSON.parse(firstPuts[0].options.body).highlights[0].id, "latest");
+
   const emptyPayload = { highlights: [], strokes: [] };
-  await cleared.scheduleRemoteSave("https://example.com/", emptyPayload);
-  assert.equal(cleared.calls[0][0], "status");
-  assert.equal(cleared.calls[0][5], emptyPayload);
+  await enabled.schedule(emptyPayload);
+  await enabled.flushNext();
+  assert.equal(enabled.fetchCalls.filter((call) => call.options.method === "MKCOL").length, 1);
+  const allPuts = enabled.fetchCalls.filter((call) => call.options.method === "PUT");
+  assert.equal(allPuts.length, 2);
+  assert.deepEqual(JSON.parse(allPuts[1].options.body), emptyPayload);
 
   console.log("remote save regression passed");
 })().catch((error) => {

@@ -33,5 +33,19 @@ assert.match(contentSource, /if \(isViewportScrollTarget\(event\?\.target\)\) re
 assert.match(contentSource, /debugLog\("menu rendered", \(\) => \(\{/);
 assert.doesNotMatch(contentSource, /estimateJsonSize/);
 assert.match(contentSource, /payload = isEmptyPageData\(pageData\) \? pageData : undefined/);
+assert.match(contentSource, /if \(!pageData\.highlights\.length\) return \[\];/);
+assert.match(contentSource, /function syncDynamicRenderEvents\(\)/);
+assert.match(contentSource, /function scheduleDynamicRender\(reason\) \{\s+if \(!hasPageAnnotations\(\)\) return;/);
+assert.match(contentSource, /fullText: null/);
+assert.match(contentSource, /textIndex\.fullText = textIndex\.nodes\.map/);
+assert.match(contentSource, /function textSliceFromIndex\(textIndex, start, end\)/);
+assert.doesNotMatch(
+  contentSource.match(/function createTextAnchor\([\s\S]*?\n\}/)?.[0] || "",
+  /documentTextFromIndex/
+);
+assert.doesNotMatch(contentSource, /await cleanupLocalStorage\(\);/);
+assert.match(contentSource, /function scheduleLocalCleanup\(\)/);
+assert.match(contentSource, /function scheduleSaveWhenIdle\(\)/);
+assert.match(contentSource, /window\.addEventListener\("pagehide", flushPendingSave\)/);
 
 console.log("performance regression passed");
