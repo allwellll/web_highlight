@@ -77,6 +77,17 @@ input:not([type="checkbox"]):not([type="color"]) {
   width: 100%;
 }
 
+.sync-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.sync-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .hint,
 #status {
   color: #666;

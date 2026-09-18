@@ -78,6 +78,10 @@ function createContext({ enabled = true, pageData = null } = {}) {
       context.__payload = payload;
       return vm.runInContext(`scheduleRemoteSave(${JSON.stringify(pageUrl)}, __payload)`, context);
     },
+    async saveNow(payload) {
+      context.__payload = payload;
+      return vm.runInContext(`saveRemoteNow(${JSON.stringify(pageUrl)}, __payload)`, context);
+    },
     async flushNext() {
       const [id, callback] = timers.entries().next().value || [];
       assert.ok(id, "a remote save timer should be pending");
@@ -95,6 +99,10 @@ function createContext({ enabled = true, pageData = null } = {}) {
   assert.equal(disabled.fetchCalls.length, 0);
   assert.equal(disabled.store.whlSyncStatus, undefined);
 
+  const disabledImmediate = await disabled.saveNow({ highlights: [], strokes: [] });
+  assert.equal(disabledImmediate.reason, "sync-disabled");
+  assert.equal(disabled.store.whlSyncStatus.pages["https://example.com/"].status, "skipped");
+
   const firstPayload = { highlights: [{ id: "first", type: "highlight" }], strokes: [] };
   const latestPayload = { highlights: [{ id: "latest", type: "highlight" }], strokes: [] };
   const enabled = createContext({ pageData: firstPayload });
@@ -108,13 +116,22 @@ function createContext({ enabled = true, pageData = null } = {}) {
   assert.equal(firstPuts.length, 1);
   assert.equal(JSON.parse(firstPuts[0].options.body).highlights[0].id, "latest");
 
+  const immediatePayload = { highlights: [{ id: "immediate", type: "highlight" }], strokes: [] };
+  await enabled.schedule(firstPayload);
+  const immediate = await enabled.saveNow(immediatePayload);
+  assert.equal(immediate.ok, true);
+  assert.equal(enabled.timers.size, 0);
+  const immediatePuts = enabled.fetchCalls.filter((call) => call.options.method === "PUT");
+  assert.equal(immediatePuts.length, 2);
+  assert.equal(JSON.parse(immediatePuts[1].options.body).highlights[0].id, "immediate");
+
   const emptyPayload = { highlights: [], strokes: [] };
   await enabled.schedule(emptyPayload);
   await enabled.flushNext();
   assert.equal(enabled.fetchCalls.filter((call) => call.options.method === "MKCOL").length, 1);
   const allPuts = enabled.fetchCalls.filter((call) => call.options.method === "PUT");
-  assert.equal(allPuts.length, 2);
-  assert.deepEqual(JSON.parse(allPuts[1].options.body), emptyPayload);
+  assert.equal(allPuts.length, 3);
+  assert.deepEqual(JSON.parse(allPuts[2].options.body), emptyPayload);
 
   console.log("remote save regression passed");
 })().catch((error) => {

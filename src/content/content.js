@@ -149,6 +149,16 @@ function bindEvents() {
       return true;
     }
 
+    if (message?.type === "WHL_UPLOAD_NOW") {
+      uploadPageDataNow().then(sendResponse);
+      return true;
+    }
+
+    if (message?.type === "WHL_RENDER_NOW") {
+      renderPageDataNow().then(sendResponse);
+      return true;
+    }
+
     return false;
   });
 }
@@ -480,16 +490,34 @@ async function loadPageData() {
 }
 
 function requestRemoteData() {
-  chrome.runtime.sendMessage({ type: "WHL_LOAD_REMOTE", url: location.href }, (response) => {
-    if (!response?.ok || !response.payload) return;
-    const remoteData = normalizePageData(response.payload);
-    if ((remoteData.updatedAt || 0) > (pageData.updatedAt || 0)) {
-      pageData = remoteData;
-      saveLocalOnly();
-      syncDynamicRenderEvents();
-      renderAll();
-    }
+  void applyRemotePageData(false).then((result) => {
+    if (!result.applied) return;
+    syncDynamicRenderEvents();
+    renderAll();
   });
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const error = chrome.runtime.lastError;
+      resolve(error ? { ok: false, reason: error.message } : response);
+    });
+  });
+}
+
+async function applyRemotePageData(allowEqualTimestamp) {
+  const response = await sendRuntimeMessage({ type: "WHL_LOAD_REMOTE", url: location.href });
+  if (!response?.ok || !response.payload) return { response, applied: false };
+  const remoteData = normalizePageData(response.payload);
+  const remoteUpdatedAt = remoteData.updatedAt || 0;
+  const localUpdatedAt = pageData.updatedAt || 0;
+  const shouldApply = remoteUpdatedAt > localUpdatedAt
+    || (allowEqualTimestamp && remoteUpdatedAt === localUpdatedAt);
+  if (!shouldApply) return { response, applied: false };
+  pageData = remoteData;
+  await saveLocalOnly();
+  return { response, applied: true };
 }
 
 function handleSelection(event) {
@@ -2157,6 +2185,53 @@ async function saveNow() {
   await saveLocalOnly();
   const payload = isEmptyPageData(pageData) ? pageData : undefined;
   chrome.runtime.sendMessage({ type: "WHL_SAVE_REMOTE", url: location.href, payload });
+}
+
+async function uploadPageDataNow() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  cancelSaveIdle();
+  await saveLocalOnly();
+  const response = await sendRuntimeMessage({
+    type: "WHL_SAVE_REMOTE_NOW",
+    url: location.href,
+    payload: pageData
+  });
+  return { ...(response || { ok: false, reason: "no-response" }), counts: counts() };
+}
+
+async function renderPageDataNow() {
+  const stored = await chrome.storage.local.get(storageKey());
+  const storedPayload = stored[storageKey()];
+  let source = "memory";
+  if (storedPayload) {
+    const localData = normalizePageData(storedPayload);
+    if ((localData.updatedAt || 0) >= (pageData.updatedAt || 0)) {
+      pageData = localData;
+      source = "local";
+    }
+  }
+  renderCurrentPageData();
+  const remoteResult = await applyRemotePageData(true);
+  if (remoteResult.applied) {
+    source = "remote";
+    renderCurrentPageData();
+  }
+  return {
+    ok: true,
+    counts: counts(),
+    source,
+    remoteOk: Boolean(remoteResult.response?.ok),
+    reason: remoteResult.response?.reason || null
+  };
+}
+
+function renderCurrentPageData() {
+  invalidateTextIndex();
+  invalidateKatexRootIndex();
+  ensureOverlayNodesConnected();
+  syncDynamicRenderEvents();
+  renderAll();
 }
 
 async function saveLocalOnly() {

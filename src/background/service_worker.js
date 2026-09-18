@@ -38,6 +38,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "WHL_SAVE_REMOTE_NOW") {
+    saveRemoteNow(message.url, message.payload).then(sendResponse);
+    return true;
+  }
+
   return false;
 });
 
@@ -116,6 +121,23 @@ async function scheduleRemoteSave(pageUrl, payload) {
   return { ok: true, queued: true };
 }
 
+async function saveRemoteNow(pageUrl, payload) {
+  const config = await getSyncConfig();
+  if (!isConfigReady(config)) {
+    await updateSyncStatus(pageUrl, "save", "skipped", "sync-disabled", payload);
+    return { ok: false, skipped: true, reason: "sync-disabled" };
+  }
+  const resolvedPayload = payload || await loadLocalPageData(pageUrl);
+  if (!resolvedPayload) {
+    await updateSyncStatus(pageUrl, "save", "skipped", "local-empty", null);
+    return { ok: false, skipped: true, reason: "local-empty" };
+  }
+  const pending = pendingRemoteSaves.get(pageUrl);
+  if (pending) clearTimeout(pending.timer);
+  pendingRemoteSaves.delete(pageUrl);
+  return runRemoteSave(pageUrl, config, resolvedPayload);
+}
+
 function cancelPendingRemoteSaves() {
   for (const pending of pendingRemoteSaves.values()) clearTimeout(pending.timer);
   pendingRemoteSaves.clear();
@@ -125,14 +147,18 @@ async function flushRemoteSave(pageUrl) {
   const pending = pendingRemoteSaves.get(pageUrl);
   if (!pending) return;
   pendingRemoteSaves.delete(pageUrl);
+  await runRemoteSave(pageUrl, pending.config, pending.payload);
+}
+
+async function runRemoteSave(pageUrl, config, payload) {
   const previous = remoteSaveChains.get(pageUrl) || Promise.resolve();
   const current = previous.catch(() => {}).then(async () => {
-    await updateSyncStatus(pageUrl, "save", "queued", "queued", pending.payload);
-    await saveRemoteAnnotations(pending.config, pageUrl, pending.payload);
+    await updateSyncStatus(pageUrl, "save", "queued", "queued", payload);
+    return saveRemoteAnnotations(config, pageUrl, payload);
   });
   remoteSaveChains.set(pageUrl, current);
   try {
-    await current;
+    return await current;
   } finally {
     if (remoteSaveChains.get(pageUrl) === current) remoteSaveChains.delete(pageUrl);
   }
@@ -157,9 +183,11 @@ async function saveRemoteAnnotations(config, pageUrl, payload) {
     });
     if (!response.ok) throw new Error(`WebDAV save failed: ${response.status}`);
     await updateSyncStatus(pageUrl, "save", "success", "saved", payload);
+    return { ok: true };
   } catch (error) {
     await updateSyncStatus(pageUrl, "save", "error", error.message, payload);
     console.warn("[Web Highlight] Remote save failed", error);
+    return { ok: false, reason: error.message };
   }
 }
 

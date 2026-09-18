@@ -18,6 +18,8 @@ const syncStatus = document.querySelector("#syncStatus");
 const clearPage = document.querySelector("#clearPage");
 const cleanupLocal = document.querySelector("#cleanupLocal");
 const saveSync = document.querySelector("#saveSync");
+const uploadNow = document.querySelector("#uploadNow");
+const renderNow = document.querySelector("#renderNow");
 const floatingColorPanelToggle = document.querySelector("#floatingColorPanelToggle");
 
 let currentState = {};
@@ -82,6 +84,8 @@ async function init() {
   });
 
   saveSync.addEventListener("click", saveSyncConfig);
+  uploadNow.addEventListener("click", () => uploadCurrentPageNow(tab));
+  renderNow.addEventListener("click", () => renderCurrentPageNow(tab));
 }
 
 async function getContentStatus(tabId) {
@@ -137,6 +141,14 @@ function sendTabMessage(tabId, message) {
   });
 }
 
+async function sendContentMessage(tabId, message) {
+  let response = await sendTabMessage(tabId, message);
+  if (response !== null) return response;
+  if (!await injectContentScript(tabId)) return null;
+  response = await sendTabMessage(tabId, message);
+  return response;
+}
+
 async function injectContentScript(tabId) {
   try {
     await chrome.scripting.insertCSS({ target: { tabId }, files: ["src/content/content.css"] });
@@ -169,6 +181,53 @@ function saveSyncConfig() {
     setStatus(response?.ok ? "同步设置已保存" : "同步设置保存失败");
     renderSyncStatus();
   });
+}
+
+async function uploadCurrentPageNow(tab) {
+  await runButtonAction(uploadNow, "上传中…", async () => {
+    setStatus("正在立即上传当前网页标注…");
+    const response = await sendContentMessage(tab.id, { type: "WHL_UPLOAD_NOW" });
+    if (response?.ok) setStatus("当前网页标注已立即上传到坚果云");
+    else setStatus(`立即上传失败：${actionFailureText(response?.reason)}`);
+    await renderSyncStatus(tab.url);
+  });
+}
+
+async function renderCurrentPageNow(tab) {
+  await runButtonAction(renderNow, "渲染中…", async () => {
+    setStatus("正在重新加载并渲染当前网页标注…");
+    const response = await sendContentMessage(tab.id, { type: "WHL_RENDER_NOW" });
+    if (!response?.ok) {
+      setStatus("立即渲染失败，请刷新页面后重试");
+      return;
+    }
+    renderCounts(response.counts);
+    const total = Object.values(response.counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    const source = { remote: "云端", local: "本地", memory: "当前页面" }[response.source] || "当前页面";
+    const remoteNote = response.remoteOk || !response.reason ? "" : `；云端拉取未完成：${actionFailureText(response.reason)}`;
+    setStatus(total ? `已从${source}立即渲染 ${total} 条标注${remoteNote}` : `当前网页暂无可渲染标注${remoteNote}`);
+    await renderSyncStatus(tab.url);
+  });
+}
+
+async function runButtonAction(button, pendingText, action) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = pendingText;
+  try {
+    await action();
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+function actionFailureText(reason) {
+  return {
+    "sync-disabled": "请先启用并保存同步设置",
+    "local-empty": "当前网页没有可上传的本地数据",
+    "no-response": "扩展后台没有响应"
+  }[reason] || reason || "未知错误";
 }
 
 async function renderSyncStatus(url) {
