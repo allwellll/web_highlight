@@ -74,6 +74,7 @@ let dynamicRenderEventsBound = false;
 let suppressSelectionMenuUntil = 0;
 let textIndexCache = null;
 let textIndexDirty = true;
+let katexRootIndexCache = null;
 let renderAllPending = false;
 
 init();
@@ -188,6 +189,7 @@ function unbindDynamicRenderEvents() {
   dynamicRenderDeferred = false;
   isScrolling = false;
   invalidateTextIndex();
+  invalidateKatexRootIndex();
 }
 
 function syncDynamicRenderEvents() {
@@ -202,6 +204,7 @@ function hasPageAnnotations() {
 function handleDocumentMutations(records) {
   if (!records.some(isExternalMutation)) return;
   invalidateTextIndex();
+  invalidateKatexRootIndex();
   scheduleDynamicRender("dom mutation");
 }
 
@@ -1417,9 +1420,29 @@ function visualAnchorRects(visualAnchor) {
 function visualAnchorRoot(visualAnchor) {
   const direct = elementFromPath(visualAnchor.rootPath);
   if (direct && (visualAnchor.type === "range" || direct.matches?.(".katex"))) return direct;
+  const index = getKatexRootIndex();
+  const exactMatches = index.rootsByText.get(visualAnchor.rootText || "");
+  if (exactMatches?.length) return exactMatches[0];
+  const selectedText = visualAnchor.selectedText || "";
+  return selectedText ? index.roots.find((root) => root.textContent?.includes(selectedText)) : null;
+}
+
+function getKatexRootIndex() {
+  if (katexRootIndexCache) return katexRootIndexCache;
   const roots = [...document.querySelectorAll(".katex")];
-  return roots.find((root) => root.textContent === visualAnchor.rootText)
-    || roots.find((root) => root.textContent?.includes(visualAnchor.selectedText || ""));
+  const rootsByText = new Map();
+  for (const root of roots) {
+    const text = root.textContent || "";
+    const matches = rootsByText.get(text);
+    if (matches) matches.push(root);
+    else rootsByText.set(text, [root]);
+  }
+  katexRootIndexCache = { roots, rootsByText };
+  return katexRootIndexCache;
+}
+
+function invalidateKatexRootIndex() {
+  katexRootIndexCache = null;
 }
 
 function buildKatexNativeRange(visualAnchor) {
@@ -1868,9 +1891,10 @@ function resizeLayers() {
 
 
 function createVisualAnchor(range) {
-  const formulaRoot = closestRangeElement(range, ".katex") || intersectedElement(range, ".katex");
+  const directFormulaRoot = closestRangeElement(range, ".katex");
+  const formulaRoot = directFormulaRoot || intersectedKatexElement(range);
   if (!formulaRoot) return null;
-  const root = closestRangeElement(range, ".katex") || visualRangeRoot(range) || formulaRoot;
+  const root = directFormulaRoot || visualRangeRoot(range) || formulaRoot;
   const rootRect = root.getBoundingClientRect();
   const rects = visualClientRects(range).map((rect) => ({
     left: rect.left - rootRect.left,
@@ -1893,11 +1917,15 @@ function visualClientRects(range) {
   return clientRects(range).filter((rect) => rect.width > 2 && rect.height > 2);
 }
 
-function intersectedElement(range, selector) {
+function intersectedKatexElement(range) {
+  if (range.startContainer === range.endContainer) return null;
   const scope = range.commonAncestorContainer?.nodeType === Node.ELEMENT_NODE
     ? range.commonAncestorContainer
     : range.commonAncestorContainer?.parentElement;
-  const candidates = scope?.querySelectorAll ? scope.querySelectorAll(selector) : document.querySelectorAll(selector);
+  if (!scope?.querySelector?.(".katex")) return null;
+  const candidates = isBroadKatexScope(scope)
+    ? getKatexRootIndex().roots
+    : scope.querySelectorAll(".katex");
   for (const element of candidates) {
     try {
       if (range.intersectsNode(element)) return element;
@@ -1905,6 +1933,10 @@ function intersectedElement(range, selector) {
     }
   }
   return null;
+}
+
+function isBroadKatexScope(scope) {
+  return scope === document.body || scope === document.documentElement;
 }
 
 function visualRangeRoot(range) {

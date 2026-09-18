@@ -55,5 +55,12 @@ assert.doesNotMatch(contentSource, /await cleanupLocalStorage\(\);/);
 assert.match(contentSource, /function scheduleLocalCleanup\(\)/);
 assert.match(contentSource, /function scheduleSaveWhenIdle\(\)/);
 assert.match(contentSource, /window\.addEventListener\("pagehide", flushPendingSave\)/);
+assert.match(contentSource, /function getKatexRootIndex\(\)/);
+assert.match(contentSource, /const exactMatches = index\.rootsByText\.get/);
+assert.match(contentSource, /if \(range\.startContainer === range\.endContainer\) return null;/);
+assert.doesNotMatch(
+  contentSource.match(/function visualAnchorRoot\([\s\S]*?\n\}/)?.[0] || "",
+  /querySelectorAll/
+);
 
 console.log("performance regression passed");
