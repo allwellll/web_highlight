@@ -18,6 +18,7 @@ const DYNAMIC_RENDER_DELAY = 300;
 const DYNAMIC_RENDER_IDLE_TIMEOUT = 1000;
 const SAVE_DELAY = 800;
 const SAVE_IDLE_TIMEOUT = 2000;
+const ANNOTATION_ENRICH_IDLE_TIMEOUT = 1000;
 const SCROLL_RENDER_DELAY = 500;
 const RESIZE_RENDER_SUPPRESSION_MS = 100;
 const DEBUG_HOSTS = ["ns01.plusai.io"];
@@ -579,19 +580,19 @@ function getCurrentSelectionData(source = "unknown") {
 
   const normalizedRange = normalizeKatexRange(range);
   const selectedText = normalizedRange.toString();
+  const rects = clientRects(normalizedRange);
   return {
     text: selectedText,
     _range: normalizedRange.cloneRange(),
-    rect: selectionRect(range)
+    _rects: rects,
+    rect: selectionRect(normalizedRange, rects)
   };
 }
 
 function addTextAnnotation(selectionData, color, type = state.mode, options = {}) {
   const resolvedSelection = resolveSelectionData(selectionData);
   if (!resolvedSelection || !isHexColor(color)) return;
-  const anchor = (resolvedSelection._range && Number.isInteger(resolvedSelection.start))
-    ? createTextAnchor(resolvedSelection._range, resolvedSelection, resolvedSelection.text)
-    : null;
+  const range = resolvedSelection._range;
   const annotation = {
     id: createId(),
     type: type === "underline" ? "underline" : "highlight",
@@ -599,28 +600,54 @@ function addTextAnnotation(selectionData, color, type = state.mode, options = {}
     text: resolvedSelection.text,
     start: resolvedSelection.start,
     end: resolvedSelection.end,
-    anchor,
+    anchor: range ? createDomAnchor(range, resolvedSelection.text) : null,
     visualAnchor: resolvedSelection.visualAnchor,
     createdAt: Date.now()
   };
   pageData.highlights.push(annotation);
   syncDynamicRenderEvents();
   recordRecentColor(color);
+  appendTextAnnotation(annotation, range, resolvedSelection._rects);
+  scheduleTextAnnotationEnrichment(annotation, range);
   if (!options.preserveSelection) clearSelection();
   hideSelectionMenu();
-  appendTextAnnotation(annotation, resolvedSelection._range);
   queueSave();
 }
 
 function resolveSelectionData(selectionData) {
   if (!selectionData) return null;
   const range = selectionData._range;
-  const offsets = Number.isInteger(selectionData.start) && Number.isInteger(selectionData.end)
-    ? { start: selectionData.start, end: selectionData.end }
-    : range ? rangeToOffsets(range) : null;
-  const visualAnchor = selectionData.visualAnchor || (range ? createVisualAnchor(range) : null);
-  if ((!offsets || offsets.start === offsets.end) && !visualAnchor) return null;
-  return { ...selectionData, start: offsets?.start, end: offsets?.end, visualAnchor };
+  const hasOffsets = Number.isInteger(selectionData.start) && Number.isInteger(selectionData.end);
+  if (!range && !hasOffsets && !selectionData.visualAnchor) return null;
+  return selectionData;
+}
+
+function scheduleTextAnnotationEnrichment(annotation, range) {
+  if (!range) return;
+  const enrich = () => {
+    try {
+      enrichTextAnnotation(annotation, range);
+    } catch (error) {
+      debugLog("text annotation enrichment failed", { message: error?.message });
+    }
+  };
+  if (globalThis.requestIdleCallback) {
+    requestIdleCallback(enrich, { timeout: ANNOTATION_ENRICH_IDLE_TIMEOUT });
+    return;
+  }
+  setTimeout(enrich, 0);
+}
+
+function enrichTextAnnotation(annotation, range) {
+  if (!pageData.highlights.includes(annotation)) return;
+  const offsets = rangeToOffsets(range);
+  if (offsets) {
+    annotation.start = offsets.start;
+    annotation.end = offsets.end;
+    annotation.anchor = createTextAnchor(range, offsets, annotation.text);
+  }
+  annotation.visualAnchor ||= createVisualAnchor(range);
+  queueSave();
 }
 
 function handleKeydown(event) {
@@ -1279,23 +1306,23 @@ function renderTextAnnotations() {
   return minimapCandidates;
 }
 
-function appendTextAnnotation(annotation, range) {
+function appendTextAnnotation(annotation, range, rects = null) {
   const fragment = document.createDocumentFragment();
-  const minimapCandidates = [];
-  renderTextAnnotation(annotation, range, {
+  const firstRect = renderTextAnnotation(annotation, range, {
     fragment,
-    minimapCandidates,
+    minimapCandidates: null,
     nativeGroups: null,
-    useNativeHighlights: supportsNativeHighlights()
+    useNativeHighlights: supportsNativeHighlights(),
+    rects
   });
   highlightLayer.appendChild(fragment);
-  appendMinimapCandidate(minimapCandidates[0]);
+  scheduleMinimapCandidateAppend(annotation, range, firstRect);
 }
 
 function renderTextAnnotation(annotation, range, context) {
-  const rectResult = annotationRects(annotation, range);
-  if (!rectResult.rects.length) return;
-  context.minimapCandidates.push(createMinimapCandidate(annotation, range, rectResult.rects[0]));
+  const rectResult = annotationRects(annotation, range, context.rects);
+  if (!rectResult.rects.length) return null;
+  context.minimapCandidates?.push(createMinimapCandidate(annotation, range, rectResult.rects[0]));
   const nativeRange = resolveNativeRange(annotation, range, rectResult, context.useNativeHighlights);
   if (nativeRange) {
     if (context.nativeGroups) collectNativeTextAnnotation(annotation, nativeRange, context.nativeGroups);
@@ -1309,6 +1336,16 @@ function renderTextAnnotation(annotation, range, context) {
     hitbox.mark = node;
     context.fragment.appendChild(node);
   }
+  return rectResult.rects[0];
+}
+
+function scheduleMinimapCandidateAppend(annotation, range, rect) {
+  if (!rect) return;
+  requestAnimationFrame(() => {
+    if (!pageData.highlights.includes(annotation)) return;
+    if (minimapCandidatesCache.some((item) => item.id === annotation.id)) return;
+    appendMinimapCandidate(createMinimapCandidate(annotation, range, rect));
+  });
 }
 
 function resolveNativeRange(annotation, range, rectResult, useNativeHighlights) {
@@ -1347,9 +1384,10 @@ function createTextAnnotationHitbox(annotation, rect) {
 }
 
 
-function annotationRects(annotation, range) {
+function annotationRects(annotation, range, providedRects = null) {
   const visualRects = visualAnchorRects(annotation.visualAnchor);
   if (visualRects.length) return { rects: visualRects, usedVisualAnchor: true };
+  if (providedRects?.length) return { rects: providedRects, usedVisualAnchor: false };
   if (range) {
     const rects = clientRects(range);
     if (rects.length) return { rects, usedVisualAnchor: false };
@@ -1550,9 +1588,17 @@ function rangeToOffsets(range) {
 function createTextAnchor(range, offsets, text) {
   const textIndex = getTextIndex();
   return {
-    version: 1,
+    ...createDomAnchor(range, text),
     prefix: textSliceFromIndex(textIndex, Math.max(0, offsets.start - ANCHOR_CONTEXT_CHARS), offsets.start),
-    suffix: textSliceFromIndex(textIndex, offsets.end, offsets.end + ANCHOR_CONTEXT_CHARS),
+    suffix: textSliceFromIndex(textIndex, offsets.end, offsets.end + ANCHOR_CONTEXT_CHARS)
+  };
+}
+
+function createDomAnchor(range, text) {
+  return {
+    version: 1,
+    prefix: "",
+    suffix: "",
     startPath: nodePath(range.startContainer),
     endPath: nodePath(range.endContainer),
     startOffset: range.startOffset,
@@ -1883,8 +1929,7 @@ function closestElement(node, selector) {
   return element?.closest?.(selector) || null;
 }
 
-function selectionRect(range) {
-  const rects = [...range.getClientRects()].filter((item) => item.width > 0 && item.height > 0);
+function selectionRect(range, rects = clientRects(range)) {
   if (!rects.length) return range.getBoundingClientRect();
   const left = Math.min(...rects.map((item) => item.left));
   const top = Math.min(...rects.map((item) => item.top));

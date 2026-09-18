@@ -43,6 +43,14 @@ assert.doesNotMatch(
   contentSource.match(/function createTextAnchor\([\s\S]*?\n\}/)?.[0] || "",
   /documentTextFromIndex/
 );
+assert.doesNotMatch(
+  contentSource.match(/function resolveSelectionData\([\s\S]*?\n\}/)?.[0] || "",
+  /rangeToOffsets|createVisualAnchor/
+);
+assert.match(contentSource, /function scheduleTextAnnotationEnrichment\(annotation, range\)/);
+assert.match(contentSource, /appendTextAnnotation\(annotation, range, resolvedSelection\._rects\);\s+scheduleTextAnnotationEnrichment/);
+assert.match(contentSource, /_rects: rects/);
+assert.match(contentSource, /function scheduleMinimapCandidateAppend\(annotation, range, rect\)/);
 assert.doesNotMatch(contentSource, /await cleanupLocalStorage\(\);/);
 assert.match(contentSource, /function scheduleLocalCleanup\(\)/);
 assert.match(contentSource, /function scheduleSaveWhenIdle\(\)/);
